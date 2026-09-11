@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\TrMadenci.Core\TrMadenci.Core.csproj" />
+    <ProjectReference Include="..\TrMadenci.Protocols\TrMadenci.Protocols.csproj" />
+    <ProjectReference Include="..\TrMadenci.NativeBridge\TrMadenci.NativeBridge.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TrMadenci.Core.Tests" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

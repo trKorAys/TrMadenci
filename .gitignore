@@ -1,0 +1,12 @@
+bin/
+obj/
+out/
+artifacts/
+.tools/
+.vs/
+.idea/
+*.user
+*.suo
+trmadenci.local.json
+trmadenci.*.local.json
+trmadenci.json

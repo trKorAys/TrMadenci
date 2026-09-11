@@ -1,0 +1,12 @@
+{
+  "coin": "etc",
+  "algorithm": "etchash",
+  "pool": {
+    "host": "etc.poolbinance.com",
+    "port": 1800,
+    "username": "BINANCE_MINING_ACCOUNT.worker",
+    "password": "x"
+  },
+  "failoverPool": null,
+  "gpuDevices": [0]
+}

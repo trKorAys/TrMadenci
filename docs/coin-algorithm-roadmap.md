@@ -1,0 +1,109 @@
+# Coin and algorithm roadmap
+
+Research snapshot: 2026-09-11
+
+## Product boundary
+
+TrMadenci must distinguish three capabilities:
+
+1. A native GPU hashing engine for consumer graphics cards.
+2. A native CPU hashing engine for CPU-oriented algorithms.
+3. An ASIC controller/proxy that configures and monitors dedicated miners without
+   pretending that a desktop GPU can compete with them.
+
+Adding a coin name is not enough. A production-ready profile needs a consensus-correct
+algorithm, the pool's Stratum dialect, job serialization, target conversion, share
+submission, wallet validation, failover behavior, test vectors, and hardware tuning.
+
+## Recommended order
+
+| Priority | Algorithm / capability | Initial networks | Hardware | Decision |
+| --- | --- | --- | --- | --- |
+| P0 | KAWPOW | Ravencoin | NVIDIA GPU | End-to-end production candidate complete; finish soak, second-pool conformance and signed packaging gates. |
+| P1 | ETCHash | Ethereum Classic | GPU / specialized hardware | In progress: full CUDA DAG, official CPU/GPU vector, Binance job/epoch handling, session/reconnect, accepted live share and current-epoch split-kernel performance complete; next complete soak qualification. |
+| P2 | Octopus | Conflux | High-VRAM NVIDIA GPU | Epoch/cache/DAG sizing, Binance wire models, full CPU oracle, CUDA DAG-item validator and gated full-DAG lifecycle implemented. Keep gated pending nonce search and live-share qualification. |
+| P2 | Cross-vendor GPU backend | Existing algorithms | AMD and Intel GPU | Use OpenCL first for broad Windows coverage; keep CUDA as the optimized NVIDIA backend. |
+| P3 | RandomX | Monero | CPU | Separate CPU engine. RandomX is explicitly optimized for general-purpose CPUs, not GPUs. |
+| Deferred | Equihash | Zcash | ASIC-dominated | Binance Pool and Spot are available, but a consumer-GPU implementation is not a competitive priority. |
+| Deferred | ETHash | EthereumPoW | GPU / specialized hardware | Binance Pool support alone is insufficient while there is no active Binance Spot market. |
+| Device support | SHA-256, Scrypt, kHeavyHash, Blake3 ASICs | BTC/BCH, LTC/DOGE, Kaspa, Alephium | ASIC | Add monitoring, configuration, proxy and Stratum support; do not spend time on noncompetitive GPU kernels. |
+
+The first expansion phase requires both a qualified Binance Pool route and an active
+Binance Spot market. Market availability changes over time and must be checked at release
+time rather than treated as a permanent consensus property. Expected earnings also
+change with price, network difficulty, reward, pool fee and electricity tariff. A later
+profitability service must timestamp all inputs and show TRY/kWh assumptions instead of
+labeling one coin as permanently "best".
+
+## Why these choices
+
+- Ravencoin documents KAWPOW as its current consumer-GPU-oriented algorithm.
+- Ethereum Classic uses ETCHash and retains GPU support, although specialized hardware
+  competition must be communicated honestly.
+- Conflux uses Octopus and documents NVIDIA GPU mining with sufficient VRAM.
+- Octopus uses 524,288-block epochs, starts with an approximately 4 GiB DAG and grows
+  by approximately 16 MiB per epoch. TrMadenci calculates the exact prime-sized
+  cache/DAG and reserves extra device memory before declaring a GPU eligible. Memory
+  sizing must use the PoW block height supplied by the Stratum job, not Conflux RPC's
+  differently defined epoch or block counters. A Binance Pool job observed on
+  2026-09-11 reported height 156,498,021 (Octopus epoch 298), whose DAG is approximately
+  8.656 GiB and fits a 12 GiB RTX 3060 with the current safety reserve.
+- Monero's RandomX reference is BSD-3-Clause, exposes a C API, and is optimized for
+  ordinary CPUs. It belongs in a separate CPU worker with explicit thread and huge-page
+  controls.
+- Kaspa's own mining documentation says mainnet mining is now ASIC-only in practical
+  terms. Alephium likewise documents that it is ASIC-friendly and that dedicated Blake3
+  miners exist. Supporting those users means managing their devices, not offering a
+  misleading GPU mode.
+- AMD HIP on Windows supports only a bounded current device list. OpenCL is therefore
+  the better first compatibility backend for older AMD mining rigs; HIP can later be an
+  optimized backend for officially supported cards.
+
+## Architecture required before P2
+
+Introduce stable interfaces before adding a second algorithm:
+
+- `IAlgorithm`: job decoding, header creation, target rules, result verification.
+- `IComputeBackend`: CUDA, OpenCL, CPU and later HIP implementations.
+- `IPoolProtocol`: Stratum V1 dialects and later Stratum V2/proxy transports.
+- `CoinProfile`: ticker, algorithm parameters, address rules, pool presets and explorer
+  metadata. The official developer destination is compiled in but always disclosed in
+  UI and logs; it is never a hidden destination.
+- `MiningSession`: cancellation on new jobs, nonce-space allocation, hashrate and share
+  accounting independent of algorithm.
+
+The fee scheduler must switch only between destinations that use the same coin,
+algorithm, epoch/DAG and compatible pool protocol. It must never silently change the
+user's selected algorithm or mine an unrelated coin.
+
+## Definition of done for every algorithm
+
+An algorithm is not listed as supported until all of these pass:
+
+1. Published vectors pass in the CPU/reference path.
+2. GPU results match the reference across epochs, boundary nonces and targets.
+3. Accepted shares are observed on at least two independent pools or one pool plus a
+   local reference node; submitted shares are CPU-verified first during qualification.
+4. Reconnect, failover, difficulty changes, clean jobs, stale shares and cancellation
+   are covered by automated tests.
+5. A 24-hour multi-GPU soak test has no invalid shares, leaks or unrecovered device
+   errors.
+6. VRAM/RAM requirements, supported devices, power behavior and measured performance
+   are displayed rather than guessed.
+7. Source and complete dependency licenses are recorded in third-party notices.
+
+## Sources
+
+- Ravencoin KAWPOW: https://ravencoin.org/about/
+- Binance Pool algorithms and endpoints: https://www.binance.com/en/support/faq/detail/32843190fc1c4329a4df024339efa8d8
+- Ethereum Classic miner FAQ: https://www.ethereumclassic.org/faqs/miners/
+- Monero RandomX documentation: https://docs.getmonero.org/proof-of-work/random-x/
+- RandomX reference and license: https://github.com/tevador/RandomX
+- Evrmore algorithm differences: https://evrmorecoin.org/other/faq/
+- Conflux Octopus specification: https://github.com/Conflux-Chain/CIPs/blob/master/CIPs/cip-3.md
+- Kaspa mining status: https://wiki.kaspa.org/mining
+- Alephium ASIC policy: https://docs.alephium.org/frequently-asked-questions/
+- OpenCL specification registry: https://registry.khronos.org/OpenCL/
+- AMD HIP for Windows support matrix: https://rocm.docs.amd.com/projects/install-on-windows/en/latest/reference/system-requirements.html
+- Stratum V2 mining protocol: https://stratumprotocol.org/specification/05-mining-protocol/
+- Ethminer classic Stratum submission reference: https://github.com/ethereum-mining/ethminer/blob/master/libpoolprotocols/stratum/EthStratumClient.cpp

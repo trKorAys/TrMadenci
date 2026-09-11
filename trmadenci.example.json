@@ -1,0 +1,12 @@
+{
+  "coin": "rvn",
+  "algorithm": "kawpow",
+  "pool": {
+    "host": "rvn.poolbinance.com",
+    "port": 9000,
+    "username": "BINANCE_MINING_ACCOUNT.worker",
+    "password": "x"
+  },
+  "failoverPool": null,
+  "gpuDevices": [0]
+}

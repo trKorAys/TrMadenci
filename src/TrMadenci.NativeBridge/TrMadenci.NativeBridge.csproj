@@ -1,0 +1,35 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <NativeConfiguration Condition="'$(Configuration)' == 'Release'">Release</NativeConfiguration>
+    <NativeConfiguration Condition="'$(Configuration)' != 'Release'">Debug</NativeConfiguration>
+    <NativeOutput Condition="'$(Configuration)' == 'Release'">..\TrMadenci.Native\out\build\windows-x64-release\Release</NativeOutput>
+    <NativeOutput Condition="'$(Configuration)' != 'Release'">..\TrMadenci.Native\out\build\windows-x64-debug-v3\Debug</NativeOutput>
+    <CudaRuntimePath>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64</CudaRuntimePath>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(NativeOutput)\TrMadenci.Native.dll')">
+    <None Include="$(NativeOutput)\TrMadenci.Native.dll"
+          Link="TrMadenci.Native.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('$(CudaRuntimePath)\nvrtc64_130_0.dll')">
+    <None Include="$(CudaRuntimePath)\nvrtc64_130_0.dll"
+          Link="nvrtc64_130_0.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="$(CudaRuntimePath)\nvrtc-builtins64_131.dll"
+          Link="nvrtc-builtins64_131.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
