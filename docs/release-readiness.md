@@ -1,6 +1,6 @@
 # KAWPOW release readiness
 
-Snapshot: 2026-09-11
+Snapshot: 2026-09-12
 
 ## Completed
 
@@ -26,6 +26,61 @@ Snapshot: 2026-09-11
 - The interactive console keeps coin/network and session analytics fixed at the top,
   recent mining events in the middle, and active power/GPU health fixed at the bottom;
   redirected output remains compatible with line-oriented log collectors.
+- Every CUDA/OpenCL worker now releases and rebuilds its epoch after transient compute
+  failure with at most three retries and 1/2/4-second backoff. Successful search resets
+  the consecutive-failure budget; deterministic configuration/runtime errors fail
+  immediately. A monotonic watchdog covers search, DAG preparation and share submission,
+  shutdown is bounded if native code cannot return, and exit code 3 identifies a required
+  process restart. Worker phase, recovery count and last error flow into dashboard and
+  soak evidence. Controlled tests cover recovery, retry exhaustion, watchdog timeout and
+  a KAWPOW job replacement crossing an epoch boundary without submitting stale work.
+- The packaged apphost now has an opt-in parent supervisor. It restarts only watchdog
+  exits and native crashes, applies 5/15/30-second backoff, opens a circuit after three
+  restarts in 15 minutes, and resets its budget after a stable ten-minute run. Normal,
+  invocation, configuration and authentication exits are never looped. Each failure gets
+  a redacted JSON report plus bounded recent output; lifecycle JSONL and the combined log
+  are kept outside the package under the user's local application-data directory.
+  Unit and Windows child-process integration tests cover classification, backoff, budget
+  reset, redaction, output retention, restart and circuit-open behavior.
+- Separate per-user supervisor and miner file leases reject duplicate processes before
+  pool/GPU work while still allowing the supervised parent-child pair. Read-only report
+  summarization includes failures, share events, hashrate, power, temperature and bounded-
+  gap estimated energy. A sanitized support-bundle generator is included in publish output.
+  The bundle excludes configuration/private-key material, redacts known secrets and worker
+  identity (including startup developer-destination and pool-ready forms), refuses
+  overwrite, and records included/skipped files. A replacement bundle from the live RVN
+  soak passed a zero-known-identifier scan. No automatic startup mechanism is installed
+  or shipped.
+- The former ETC-only soak runner is now shared by KAWPOW and ETCHASH through
+  `--soak-hours`. It retains the ETC command alias, rejects qualification conflicts and
+  unsupported algorithms before pool access, stops cleanly at the requested duration,
+  and records peak temperature, aggregate power and recovery totals in its final summary.
+  Sanitized support bundles can include both supervisor and soak evidence.
+- Manual pause/resume is shared by KAWPOW, ETCHASH and Octopus. Direct and supervisor
+  terminals accept `P`=pause, `S`=start/resume and `D`=status; `R` remains a resume alias,
+  and a second invocation can use
+  `--pause`, `--resume`, or `--mining-status` without a configuration file. Pools stay
+  connected and cache fresh work while workers are paused. Fee, active-mining and soak
+  duration counters do not advance; pause count/duration are retained in soak summaries.
+- A six-minute RC9 RVN/KAWPOW Supervisor soak completed normally on the RTX 3060 and
+  exercised the published duration path. The DAG built in 35.96 seconds, active mining
+  averaged 12.74 MH/s, eight user shares were accepted with zero rejected or locally
+  invalid shares, measured energy was 0.016154 kWh, maximum temperature was 75 C, and
+  peak aggregate power was 170.3 W. There were no worker recoveries, supervisor restarts,
+  or crash reports; exit code 0 was correctly treated as final. The product owner accepted
+  this as the successful single-GPU RVN qualification on 2026-09-12. The recorded duration
+  remains six minutes and is not misrepresented as 24-hour/multi-GPU evidence; those and
+  second-pool coverage remain broader public-release gates.
+- The unsigned `0.1.0-rc14` package is assembled from the current Release native build,
+  contains all required runtime and example files, excludes local worker configuration,
+  and is ready for publisher signing. Its packaged native DLL matches the Release build
+  at SHA-256 `51EA656070ACCDCED52ACFB5FF0D950BB95CB3642C295EB1E5B563C27D1DEFD4`;
+  the unsigned service apphost is
+  `AA839AB4512EA5236FF85220679A38169BB4C469BE254A85D473870C2E8D2989`.
+- The Release solution build is warning-free and all 141 hardware-independent tests pass,
+  including pause timing/idempotence, same-user named-pipe control, and paused Octopus
+  fresh-job routing. Supervisor status-transport integration and the `P`/`S`/`D`/`R`
+  keyboard map are also covered. No mining was started while validating RC14.
 
 ## Release gates still requiring operational time or credentials
 
@@ -33,11 +88,19 @@ Snapshot: 2026-09-11
   observations. A short successful run is not evidence for this duration-dependent gate.
 - Qualify against a second independent Ravencoin pool or a local reference node,
   including deliberate disconnect, failover, stale-job and difficulty-change scenarios.
-- Malware-scan the RC package and sign the executable with the publisher's code-signing
+- Malware-scan the RC package and sign its binaries with the publisher's code-signing
   certificate before public distribution. A certificate is intentionally not generated
-  or impersonated by the repository.
-- Add a watchdog/recovery policy for CUDA device loss and record a multi-GPU test on
-  each supported compute-capability family intended for the public release.
+  or impersonated by the repository. `scripts/Sign-TrMadenci.ps1` accepts only a real
+  code-signing certificate already present in the Windows certificate store and signs
+  every first-party application EXE, managed DLL and native DLL without handling PFX
+  passwords. The independent `scripts/Test-TrMadenciSignatures.ps1` gate requires one
+  matching publisher, trusted timestamps, and valid Authenticode on every third-party
+  EXE/DLL in the package. The release-manifest scripts then record and verify SHA-256,
+  length, missing-file and unexpected-file integrity for the complete assembled package.
+  `scripts/Invoke-TrMadenciOpenClReleaseGate.ps1` combines those read-only checks with
+  the explicit same-process ETCHash OpenCL qualification after mining is acknowledged.
+- Record a real device-loss/recovery observation and a multi-GPU test on each supported
+  compute-capability family intended for the public release.
 
 Until those external qualification gates pass, describe this build as a production
 candidate rather than a final production release.
@@ -88,9 +151,20 @@ candidate rather than a final production release.
   about 48% above the pre-split live qualification band of 9.84-10.40 MH/s.
 - ETC remains disabled until the soak gate passes.
 
+RC14 retains the standalone, read-only `--verify-etc-soak=<summary.json>` promotion gate. It
+requires a completed ETC/ETCHASH soak requested for at least 24 hours, at least 95% active
+mining time, adequate status density, one accepted user-beneficiary share, zero locally
+invalid shares, no more than 5% rejected shares, positive power/energy/VRAM evidence, peak
+temperature below 85 C, and no final `Faulted`/`Recovering` worker. Status snapshots now
+separate user and developer accepted shares, and summaries retain maximum VRAM per device.
+The ETC profile is not enabled merely because this code exists; it will be promoted only
+after real evidence passes the fixed verifier.
+
 The duration-controlled soak runner writes ten-second JSONL status/event evidence and a
 final JSON summary under `artifacts/soak`, including process id, wall-clock/active time,
-shares, invalid results, energy and per-GPU health. A 36-second live smoke-soak completed
+shares, invalid results, energy and per-GPU health. It now uses the shared KAWPOW/ETCHASH
+recorder; the previously captured ETC evidence remains valid. A 36-second live smoke-soak
+completed
 automatically with valid JSONL, 14.60 MH/s at its final sample, zero invalid shares and a
 clean summary. This validates the runner, not the required 24-hour duration.
 
@@ -98,3 +172,25 @@ A planned 24-hour RTX 3060 run started on 2026-09-11 at 16:10:36 +03:00 but was 
 at the user's request shortly after startup because the machine was unattended. Its
 partial append-only evidence remains at
 `artifacts/soak/etchash-soak-20260911-161036.jsonl`; it does not satisfy the soak gate.
+
+A second ETC run on 2026-09-12/13 produced 2:08:35 wall-clock and 1:59:27 active evidence,
+including one 8:18 manual pause. It averaged 15.16 MH/s, accepted 14 user shares with zero
+rejected and zero locally invalid shares, reached 69 C and 131.703 W maximums, recorded
+0.260914 kWh, used at most 6.28 GiB VRAM, and had zero worker recoveries. The operator
+stopped it with Ctrl+C while paused, so its outcome is correctly `cancelled`; this is strong
+partial stability evidence but does not satisfy the fixed 24-hour qualification gate.
+
+## OpenCL expansion status
+
+- Dynamic OpenCL discovery and a deterministic compile/buffer/CPU comparison test pass
+  on the RTX 3060 without relying on CUDA device indexes.
+- The ETCHash activation DAG was built persistently through OpenCL in 4.49 seconds using
+  2,583 MiB; its first, middle and final items match the CPU oracle byte-for-byte.
+- The split OpenCL seed, Hashimoto and final-target nonce path is wired to the
+  backend-neutral ETC worker. The official epoch-0 vector, target-zero rejection and
+  first accepted pool share form one same-process qualification gate.
+- Windows Smart App Control activated before that native nonce diagnostic could execute
+  and rejects the newly built unsigned `TrMadenci.Native.dll`. No pool connection or
+  share submission was started after the block. Qualification remains pending until the
+  `rc14` binaries receive a trusted publisher signature; Smart App Control is not disabled
+  and a self-signed root is not installed as a workaround.

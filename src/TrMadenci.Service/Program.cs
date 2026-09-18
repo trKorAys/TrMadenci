@@ -1,14 +1,156 @@
-using System.Globalization;
 using System.Text.Json;
 using TrMadenci.Core.Configuration;
 using TrMadenci.Protocols.Stratum;
 using TrMadenci.NativeBridge;
 using TrMadenci.Service.Mining;
 
+var etcSoakVerificationArguments = args.Where(argument =>
+    argument.StartsWith("--verify-etc-soak=", StringComparison.OrdinalIgnoreCase)).ToArray();
+if (etcSoakVerificationArguments.Length > 0)
+{
+    if (etcSoakVerificationArguments.Length != 1 || args.Length != 1)
+    {
+        Console.Error.WriteLine(
+            "Use --verify-etc-soak=<summary.json> as a standalone command.");
+        return ServiceExitCodes.InvalidInvocation;
+    }
+
+    var verificationArgument = etcSoakVerificationArguments[0];
+    var summaryPath = verificationArgument[(verificationArgument.IndexOf('=') + 1)..];
+    if (string.IsNullOrWhiteSpace(summaryPath))
+    {
+        Console.Error.WriteLine("--verify-etc-soak requires a summary JSON path.");
+        return ServiceExitCodes.InvalidInvocation;
+    }
+
+    var result = EtcSoakQualification.Evaluate(summaryPath);
+    Console.WriteLine(result.Passed
+        ? "ETC PRODUCTION SOAK: PASS"
+        : "ETC PRODUCTION SOAK: FAIL");
+    Console.WriteLine(
+        $"Requested={result.RequestedDuration:c}, wall={result.WallClockDuration:c}, " +
+        $"active={result.ActiveMiningTime:c}, samples={result.StatusSamples}");
+    Console.WriteLine(
+        $"Shares accepted={result.AcceptedShares} (user={result.AcceptedUserShares}), " +
+        $"rejected={result.RejectedShares}, invalid={result.InvalidShares}, " +
+        $"max-temp={result.MaximumTemperatureC} C, recoveries={result.MaximumRecoveries}");
+    foreach (var failure in result.Failures)
+        Console.Error.WriteLine($"- {failure}");
+    return result.Passed ? ServiceExitCodes.Success : ServiceExitCodes.Failure;
+}
+
+var controlCommands = new List<MiningControlCommand>();
+foreach (var argument in args)
+{
+    if (string.Equals(argument, "--pause", StringComparison.OrdinalIgnoreCase))
+        controlCommands.Add(MiningControlCommand.Pause);
+    else if (string.Equals(argument, "--resume", StringComparison.OrdinalIgnoreCase))
+        controlCommands.Add(MiningControlCommand.Resume);
+    else if (string.Equals(argument, "--mining-status", StringComparison.OrdinalIgnoreCase))
+        controlCommands.Add(MiningControlCommand.Status);
+}
+if (controlCommands.Count > 0)
+{
+    if (controlCommands.Count != 1 ||
+        args.Contains("--mine", StringComparer.OrdinalIgnoreCase) ||
+        args.Contains("--supervise", StringComparer.OrdinalIgnoreCase))
+    {
+        Console.Error.WriteLine(
+            "Use exactly one of --pause, --resume or --mining-status as a standalone command.");
+        return ServiceExitCodes.InvalidInvocation;
+    }
+
+    try
+    {
+        var response = await MiningControlClient.SendAsync(controlCommands[0]);
+        Console.WriteLine(
+            $"{response.Message} State={response.State}, PID={response.ProcessId}, " +
+            $"pauses={response.PauseCount}, paused time={response.TotalPausedDuration:c}.");
+        return response.Success ? ServiceExitCodes.Success : ServiceExitCodes.Failure;
+    }
+    catch (Exception exception) when (
+        exception is IOException or TimeoutException or OperationCanceledException or UnauthorizedAccessException)
+    {
+        Console.Error.WriteLine(
+            $"No controllable TrMadenci mining process was found: {exception.Message}");
+        return ServiceExitCodes.Failure;
+    }
+}
+
+var supervise = args.Contains("--supervise", StringComparer.OrdinalIgnoreCase);
+var miningRequested = args.Contains("--mine", StringComparer.OrdinalIgnoreCase);
+var instanceRole = supervise
+    ? ServiceInstanceLock.SupervisorRole
+    : miningRequested
+        ? ServiceInstanceLock.MiningRole
+        : null;
+using var instanceLock = instanceRole is null ? null : ServiceInstanceLock.TryAcquire(instanceRole);
+if (instanceLock is { Acquired: false })
+{
+    var owner = instanceLock.Owner is null
+        ? "owner metadata is unavailable"
+        : $"PID {instanceLock.Owner.ProcessId}, started {instanceLock.Owner.StartedAt:O}";
+    Console.Error.WriteLine(
+        $"Another TrMadenci {instanceRole} instance is already active ({owner}). " +
+        $"Lock: {instanceLock.LockPath}");
+    return ServiceExitCodes.AlreadyRunning;
+}
+
+if (supervise)
+{
+    var childArguments = args
+        .Where(argument => !string.Equals(argument, "--supervise", StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    if (!childArguments.Contains("--supervised-child", StringComparer.OrdinalIgnoreCase))
+        childArguments = [.. childArguments, "--supervised-child"];
+    using var supervisorShutdown = new CancellationTokenSource();
+    ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
+    {
+        eventArgs.Cancel = true;
+        supervisorShutdown.Cancel();
+    };
+    Console.CancelKeyPress += cancelHandler;
+    using var supervisorDashboard = ConsoleDashboard.CreateForSupervisor(
+        !args.Contains("--plain-console", StringComparer.OrdinalIgnoreCase));
+    Action<string> supervisorLog = supervisorDashboard is null
+        ? Console.WriteLine
+        : supervisorDashboard.Log;
+    Action<string> supervisorError = supervisorDashboard is null
+        ? Console.Error.WriteLine
+        : message => supervisorDashboard.Log($"HATA: {message}");
+    await using var supervisorKeys = ConsoleMiningKeyListener.CreateRemote(
+        supervisorLog,
+        supervisorDashboard is null ? null : supervisorDashboard.UpdateControlState);
+    supervisorKeys.Start();
+    try
+    {
+        return await MiningSupervisor.RunAsync(
+            childArguments,
+            supervisorShutdown.Token,
+            consoleOutput: supervisorLog,
+            consoleError: supervisorError,
+            updateStatus: supervisorDashboard is null ? null : supervisorDashboard.Update);
+    }
+    catch (Exception exception)
+    {
+        Console.Error.WriteLine($"Supervisor failed: {exception.Message}");
+        return ServiceExitCodes.Failure;
+    }
+    finally
+    {
+        Console.CancelKeyPress -= cancelHandler;
+    }
+}
+
 var etcHashLiveBenchmark = args.Contains("--etchash-live-benchmark", StringComparer.OrdinalIgnoreCase);
 var probe = args.Contains("--probe", StringComparer.OrdinalIgnoreCase) || etcHashLiveBenchmark;
 var verboseProtocol = args.Contains("--verbose-protocol", StringComparer.OrdinalIgnoreCase);
 var nativeProbe = args.Contains("--native-probe", StringComparer.OrdinalIgnoreCase);
+var openClProbe = args.Contains("--opencl-probe", StringComparer.OrdinalIgnoreCase);
+var openClSelfTest = args.Contains("--opencl-self-test", StringComparer.OrdinalIgnoreCase);
+var etcHashOpenClSelfTest = args.Contains("--etchash-opencl-self-test", StringComparer.OrdinalIgnoreCase);
+var etcHashOpenClBuildDag = args.Contains("--etchash-opencl-build-dag", StringComparer.OrdinalIgnoreCase);
+var etcHashOpenClNonceSelfTest = args.Contains("--etchash-opencl-nonce-self-test", StringComparer.OrdinalIgnoreCase);
 var buildDag = args.Contains("--build-dag", StringComparer.OrdinalIgnoreCase);
 var nonceSelfTest = args.Contains("--nonce-self-test", StringComparer.OrdinalIgnoreCase);
 var etcHashSelfTest = args.Contains("--etchash-self-test", StringComparer.OrdinalIgnoreCase);
@@ -18,25 +160,15 @@ var etcHashNonceSelfTest = args.Contains("--etchash-nonce-self-test", StringComp
 var octopusMultiPointSelfTest = args.Contains("--octopus-multipoint-self-test", StringComparer.OrdinalIgnoreCase);
 var octopusCudaSelfTest = args.Contains("--octopus-cuda-self-test", StringComparer.OrdinalIgnoreCase);
 var octopusBuildDag = args.Contains("--octopus-build-dag", StringComparer.OrdinalIgnoreCase);
+var octopusNonceSelfTest = args.Contains("--octopus-nonce-self-test", StringComparer.OrdinalIgnoreCase);
+var octopusQualification = args.Contains("--octopus-qualification", StringComparer.OrdinalIgnoreCase);
 var mine = args.Contains("--mine", StringComparer.OrdinalIgnoreCase);
 var etcHashQualification = args.Contains("--etchash-qualification", StringComparer.OrdinalIgnoreCase);
-var soakArguments = args.Where(argument =>
-    argument.StartsWith("--etchash-soak-hours=", StringComparison.OrdinalIgnoreCase)).ToArray();
-TimeSpan? etcHashSoakDuration = null;
-string? soakArgumentError = soakArguments.Length > 1
-    ? "--etchash-soak-hours may be specified only once."
-    : null;
-if (soakArguments.Length == 1)
-{
-    var soakArgument = soakArguments[0];
-    var value = soakArgument[(soakArgument.IndexOf('=') + 1)..];
-    if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var hours) ||
-        hours <= 0 || hours > 168)
-        soakArgumentError = "--etchash-soak-hours must be greater than 0 and no more than 168.";
-    else
-        etcHashSoakDuration = TimeSpan.FromHours(hours);
-}
+var etcHashOpenClQualification = args.Contains(
+    "--etchash-opencl-qualification", StringComparer.OrdinalIgnoreCase);
+var qualifiedOpenClDevices = new HashSet<ComputeDeviceId>();
 var plainConsole = args.Contains("--plain-console", StringComparer.OrdinalIgnoreCase);
+var supervisedChild = args.Contains("--supervised-child", StringComparer.OrdinalIgnoreCase);
 var configPath = args.FirstOrDefault(argument => !argument.StartsWith("--", StringComparison.Ordinal)) ?? "trmadenci.json";
 
 if (!File.Exists(configPath))
@@ -47,8 +179,7 @@ if (!File.Exists(configPath))
 
 try
 {
-    if (soakArgumentError is not null)
-        throw new ArgumentException(soakArgumentError);
+    var soakRequest = MiningSoakRequest.Parse(args);
     var json = await File.ReadAllTextAsync(configPath);
     var options = JsonSerializer.Deserialize<MinerOptions>(json, new JsonSerializerOptions
     {
@@ -57,6 +188,16 @@ try
 
     options.Validate();
     var coin = CoinProfileCatalog.GetRequired(options.Coin);
+    OpenClQualificationGate.ValidateRequest(
+        etcHashOpenClQualification,
+        mine,
+        coin.Algorithm,
+        options.ComputeBackend,
+        etcHashOpenClNonceSelfTest);
+    soakRequest?.Validate(
+        mine,
+        coin.Algorithm,
+        etcHashQualification || etcHashOpenClQualification || octopusQualification);
     if (octopusBuildDag && (!probe ||
         !string.Equals(coin.Algorithm, "octopus", StringComparison.OrdinalIgnoreCase)))
         throw new ArgumentException(
@@ -65,6 +206,7 @@ try
     Console.WriteLine("TrMadenci service bootstrap is ready.");
     Console.WriteLine($"Coin/network: {coin.Name} ({coin.Ticker}) / {coin.Network}");
     Console.WriteLine($"Algorithm: {coin.Algorithm.ToUpperInvariant()}");
+    Console.WriteLine($"Compute backend: {options.ComputeBackend.ToString().ToUpperInvariant()}");
     Console.WriteLine($"Pool: {options.Pool.Host}:{options.Pool.Port}");
     Console.WriteLine($"User worker: {options.Pool.Username} (explicit configuration; no automatic fallback)");
     Console.WriteLine($"Developer fee: {ProductPolicy.DeveloperFeeRate:P2} (embedded, transparent randomized windows)");
@@ -80,6 +222,108 @@ try
             Console.WriteLine($"CUDA{device.Index}: {device.Name}, {device.TotalMemoryBytes / 1024 / 1024} MiB, sm_{device.ComputeMajor}{device.ComputeMinor}");
             NativeDiagnostics.TryGetGpuTelemetry(device.Index, out var telemetry);
             Console.WriteLine(GpuTelemetryFormatter.Format(device.Index, 0, telemetry));
+        }
+    }
+
+    if (openClProbe || openClSelfTest || etcHashOpenClSelfTest || etcHashOpenClBuildDag ||
+        etcHashOpenClNonceSelfTest)
+    {
+        var openClDevices = NativeDiagnostics.GetOpenClDevices();
+        Console.WriteLine($"OpenCL GPU devices: {openClDevices.Count}");
+        foreach (var device in openClDevices)
+            Console.WriteLine(
+                $"OpenCL P{device.PlatformIndex}/D{device.DeviceIndex}: {device.Name} | " +
+                $"{device.Vendor} | {device.TotalMemoryBytes / 1024d / 1024 / 1024:F2} GiB | " +
+                $"compute units={device.ComputeUnits} | {device.Version}");
+        if (openClSelfTest)
+        {
+            if (openClDevices.Count == 0)
+                throw new InvalidOperationException("No OpenCL GPU is available for the runtime self-test.");
+            foreach (var device in openClDevices)
+            {
+                var checksum = NativeDiagnostics.RunOpenClSelfTest(
+                    device.PlatformIndex, device.DeviceIndex);
+                Console.WriteLine(
+                    $"OpenCL P{device.PlatformIndex}/D{device.DeviceIndex} runtime self-test passed: " +
+                    $"checksum=0x{checksum:x8}.");
+            }
+        }
+        if (etcHashOpenClSelfTest)
+        {
+            if (openClDevices.Count == 0)
+                throw new InvalidOperationException("No OpenCL GPU is available for ETCHash validation.");
+            foreach (var device in openClDevices)
+            {
+                NativeDiagnostics.ValidateEtcHashOpenClDagItems(
+                    11_700_000, device.PlatformIndex, device.DeviceIndex, 8);
+                Console.WriteLine(
+                    $"OpenCL P{device.PlatformIndex}/D{device.DeviceIndex}: 8 ETCHash DAG items " +
+                    "match the 256-parent CPU oracle.");
+            }
+        }
+        if (etcHashOpenClBuildDag)
+        {
+            if (openClDevices.Count == 0)
+                throw new InvalidOperationException("No OpenCL GPU is available for the ETCHash DAG build.");
+            const int activationBlock = 11_700_000;
+            var device = openClDevices[0];
+            Console.WriteLine(
+                $"Building the full ETCHash OpenCL DAG on P{device.PlatformIndex}/D{device.DeviceIndex}...");
+            using var epoch = NativeDiagnostics.CreateEtcHashOpenClEpoch(
+                activationBlock, device.PlatformIndex, device.DeviceIndex);
+            Console.WriteLine(
+                $"ETCHash OpenCL DAG ready: epoch {epoch.BuildInfo.EpochNumber}, " +
+                $"{epoch.BuildInfo.DatasetBytes / 1024 / 1024} MiB in " +
+                $"{epoch.BuildInfo.BuildTime.TotalSeconds:F2}s. Releasing validation context.");
+        }
+        if (etcHashOpenClNonceSelfTest)
+        {
+            if (openClDevices.Count == 0)
+                throw new InvalidOperationException("No OpenCL GPU is available for the ETCHash nonce test.");
+            const int blockNumber = 22;
+            const ulong expectedNonce = 0x495732e0ed7a801cUL;
+            var header = Convert.FromHexString(
+                "372ECA2454EAD349C3DF0AB5D00B0B706B23E49D469387DB91811CEE0358FC6D");
+            var requestedDeviceIds = options.ComputeBackend == ComputeBackendMode.OpenCl &&
+                options.ComputeDevices.Length > 0
+                    ? options.ComputeDevices.Select(ComputeDeviceId.Parse).ToHashSet()
+                    : null;
+            var nonceTestDevices = openClDevices.Where(device => requestedDeviceIds is null ||
+                requestedDeviceIds.Contains(new ComputeDeviceId(
+                    ComputeBackendKind.OpenCl, device.PlatformIndex, device.DeviceIndex))).ToArray();
+            if (requestedDeviceIds is not null && nonceTestDevices.Length != requestedDeviceIds.Count)
+                throw new InvalidOperationException(
+                    "One or more configured OpenCL devices were not found for nonce qualification.");
+            foreach (var device in nonceTestDevices)
+            {
+                var deviceId = new ComputeDeviceId(
+                    ComputeBackendKind.OpenCl, device.PlatformIndex, device.DeviceIndex);
+                Console.WriteLine(
+                    $"Building ETCHash epoch 0 OpenCL DAG on {deviceId} and running the official nonce vector...");
+                using var epoch = NativeDiagnostics.CreateEtcHashOpenClEpoch(
+                    blockNumber, device.PlatformIndex, device.DeviceIndex);
+                var result = epoch.Search(
+                    blockNumber, header, Enumerable.Repeat((byte)0xff, 32).ToArray(), expectedNonce, 1);
+                var reference = NativeDiagnostics.ComputeEtcHashReferenceHash(blockNumber, header, expectedNonce);
+                if (!result.SolutionFound || result.Nonce != expectedNonce ||
+                    !result.MixHash.AsSpan().SequenceEqual(reference.MixHash) ||
+                    !result.FinalHash.AsSpan().SequenceEqual(reference.FinalHash) ||
+                    Convert.ToHexString(result.FinalHash) !=
+                    "00000B184F1FDD88BFD94C86C39E65DB0C36144D5E43F745F722196E730CB614")
+                    throw new InvalidOperationException($"ETCHash OpenCL nonce vector failed on {deviceId}.");
+                const uint rejectionBatchSize = 4_096;
+                var rejection = epoch.Search(blockNumber, header, new byte[32], 0, rejectionBatchSize);
+                if (rejection.SolutionFound || rejection.HashesSearched != rejectionBatchSize ||
+                    rejection.SearchTime <= TimeSpan.Zero)
+                    throw new InvalidOperationException($"ETCHash OpenCL rejection batch failed on {deviceId}.");
+                qualifiedOpenClDevices.Add(deviceId);
+                Console.WriteLine(
+                    $"ETCHash OpenCL nonce self-test passed on {deviceId}: " +
+                    $"DAG={epoch.BuildInfo.DatasetBytes / 1024 / 1024} MiB, " +
+                    $"vector={result.SearchTime.TotalMilliseconds:F2}ms, " +
+                    $"4K rejection batch={rejection.SearchTime.TotalMilliseconds:F2}ms, " +
+                    $"hash={Convert.ToHexString(result.FinalHash).ToLowerInvariant()}.");
+            }
         }
     }
 
@@ -202,6 +446,30 @@ try
         Console.WriteLine("Octopus CUDA DAG validation passed. No full DAG was allocated.");
     }
 
+    if (octopusNonceSelfTest)
+    {
+        const ulong blockNumber = 2;
+        const ulong nonce = 0x2333333320;
+        var header = Convert.FromHexString(
+            "4D99D0B41C7EB0DD1A801C35AAE2DF28AE6B53BC7743F0818A34B6EC97F5B4AE");
+        Console.WriteLine("Building the Octopus epoch-0 DAG and checking one CUDA nonce...");
+        using var epoch = NativeDiagnostics.CreateOctopusCudaEpoch(blockNumber, 0);
+        var result = epoch.Search(
+            blockNumber, header, Enumerable.Repeat((byte)0xff, 32).ToArray(), nonce, 1);
+        var multiPoint = TrMadenci.Core.Algorithms.OctopusMultiPoint.Evaluate(header, nonce);
+        var reference = NativeDiagnostics.ComputeOctopusReferenceHash(
+            blockNumber, header, nonce, multiPoint.Compressed, multiPoint.Points.ToArray());
+        if (!result.SolutionFound || result.Nonce != nonce ||
+            !result.FinalHash.AsSpan().SequenceEqual(reference) ||
+            Convert.ToHexString(result.FinalHash) !=
+            "D45C965D3707E27A42995132637854234385CBF5626897259F1EE980554DDD5C")
+            throw new InvalidOperationException("Octopus CUDA nonce self-test failed.");
+        Console.WriteLine(
+            $"Octopus CUDA nonce self-test passed: DAG={epoch.BuildInfo.DatasetBytes / 1024d / 1024 / 1024:F3} GiB, " +
+            $"build={epoch.BuildInfo.BuildTime.TotalSeconds:F2}s, " +
+            $"search={result.SearchTime.TotalMilliseconds:F2}ms.");
+    }
+
     if (probe)
     {
         if (string.Equals(coin.Algorithm, "etchash", StringComparison.OrdinalIgnoreCase))
@@ -213,7 +481,7 @@ try
                 verboseProtocol,
                 nativeProbe,
                 octopusBuildDag,
-                options.GpuDevices);
+                options.GetCudaDeviceIndexes());
         else
             await ProbePoolAsync(options.Pool, verboseProtocol, nativeProbe, buildDag);
     }
@@ -222,18 +490,23 @@ try
         !string.Equals(coin.Algorithm, "etchash", StringComparison.OrdinalIgnoreCase)))
         throw new ArgumentException(
             "--etchash-qualification requires --mine and an ETCHash coin profile.");
-    if (etcHashSoakDuration is not null && (!mine ||
-        !string.Equals(coin.Algorithm, "etchash", StringComparison.OrdinalIgnoreCase)))
+    if (etcHashQualification && etcHashOpenClQualification)
+        throw new ArgumentException("Use either CUDA or OpenCL ETCHash qualification, not both.");
+    if (octopusQualification && (!mine ||
+        !string.Equals(coin.Algorithm, "octopus", StringComparison.OrdinalIgnoreCase)))
         throw new ArgumentException(
-            "--etchash-soak-hours requires --mine and an ETCHash coin profile.");
-    if (etcHashQualification && etcHashSoakDuration is not null)
-        throw new ArgumentException(
-            "Use either --etchash-qualification or --etchash-soak-hours, not both.");
+            "--octopus-qualification requires --mine and an Octopus coin profile.");
 
     if (mine)
     {
-        var qualificationAllowed = (etcHashQualification || etcHashSoakDuration is not null) &&
-            string.Equals(coin.Algorithm, "etchash", StringComparison.OrdinalIgnoreCase);
+        if (options.ComputeBackend == ComputeBackendMode.OpenCl && !etcHashOpenClQualification)
+            throw new InvalidOperationException(
+                "OpenCL mining remains gated until the signed ETCHash nonce-vector qualification passes.");
+        var qualificationAllowed =
+            ((etcHashQualification || etcHashOpenClQualification || soakRequest is not null) &&
+                string.Equals(coin.Algorithm, "etchash", StringComparison.OrdinalIgnoreCase)) ||
+            (octopusQualification &&
+                string.Equals(coin.Algorithm, "octopus", StringComparison.OrdinalIgnoreCase));
         if (!coin.MiningEnabled && !qualificationAllowed)
             throw new InvalidOperationException(
                 $"Mining for {coin.Ticker} is not enabled: {coin.MiningBlockedReason}");
@@ -241,18 +514,29 @@ try
             Console.WriteLine(
                 "ETCHash QUALIFICATION MODE: mining stops automatically after the first accepted share; " +
                 "this does not enable the public ETC profile.");
-        if (etcHashSoakDuration is { } soakDuration)
+        if (etcHashOpenClQualification)
             Console.WriteLine(
-                $"ETCHash SOAK MODE: requested duration={soakDuration}; the public ETC profile remains gated.");
+                "ETCHash OPENCL QUALIFICATION MODE: every selected device passed the official vector " +
+                "in this process; mining stops after the first CPU-verified, pool-accepted share.");
+        if (soakRequest is { Duration: { } soakDuration })
+            Console.WriteLine(
+                $"{coin.Algorithm.ToUpperInvariant()} SOAK MODE: requested duration={soakDuration}; " +
+                "evidence and a final health summary will be recorded.");
+        if (octopusQualification)
+            Console.WriteLine(
+                "OCTOPUS QUALIFICATION MODE: experimental mining stops automatically after the first " +
+                "CPU-verified, pool-accepted share; this does not enable the public CFX profile.");
         using var shutdown = new CancellationTokenSource();
         Console.CancelKeyPress += (_, eventArgs) =>
         {
             eventArgs.Cancel = true;
             shutdown.Cancel();
         };
-        using var dashboard = ConsoleDashboard.CreateIfSupported(options, coin, !plainConsole);
-        using var soakRecorder = etcHashSoakDuration is { } requestedDuration
-            ? new EtcHashSoakRecorder(requestedDuration)
+        var pauseController = new MiningPauseController();
+        using var dashboard = ConsoleDashboard.CreateIfSupported(
+            options, coin, pauseController, !plainConsole);
+        using var soakRecorder = soakRequest is { Duration: { } requestedDuration }
+            ? new MiningSoakRecorder(coin, requestedDuration, pauseController: pauseController)
             : null;
         Action<string> consoleMiningLog = dashboard is null
             ? message => Console.WriteLine($"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}] {message}")
@@ -264,23 +548,34 @@ try
                 consoleMiningLog(message);
                 soakRecorder.RecordEvent(message);
             };
+        await using var miningControlServer = new MiningControlServer(pauseController, miningLog);
+        miningControlServer.Start();
+        await using var miningKeys = ConsoleMiningKeyListener.CreateLocal(pauseController, miningLog);
+        miningKeys.Start();
         if (soakRecorder is not null)
             Console.WriteLine(
                 $"Soak evidence: {soakRecorder.EventsPath}{Environment.NewLine}" +
                 $"Soak summary:  {soakRecorder.SummaryPath}");
         if (dashboard is null)
-            Console.WriteLine("Mining started. Press Ctrl+C to stop safely.");
+            Console.WriteLine(
+                "Mining started. P=pause, S=start/resume, D=status, Ctrl+C=safe stop. " +
+                "A second terminal may use --pause/--resume/--mining-status.");
         else
-            dashboard.Log("Mining started. Press Ctrl+C to stop safely.");
-        Action<MiningStatusSnapshot>? statusUpdate = dashboard is null && soakRecorder is null
+            dashboard.Log(
+                "Mining started. P=pause, S=start/resume, D=status, Ctrl+C=safe stop.");
+        Action<MiningStatusSnapshot>? statusUpdate =
+            dashboard is null && soakRecorder is null && !supervisedChild
             ? null
             : snapshot =>
             {
                 dashboard?.Update(snapshot);
                 soakRecorder?.RecordStatus(snapshot);
+                if (supervisedChild)
+                    Console.WriteLine(MiningStatusTransport.Encode(snapshot));
                 if (dashboard is null)
                     miningLog(
-                        $"Soak status: {snapshot.CurrentHashesPerSecond / 1_000_000:F2} MH/s, " +
+                        $"{(soakRecorder is null ? "Mining" : "Soak")} status: " +
+                        $"{snapshot.CurrentHashesPerSecond / 1_000_000:F2} MH/s, " +
                         $"shares={snapshot.AcceptedShares}/{snapshot.RejectedShares}, " +
                         $"invalid={snapshot.InvalidShares}, energy={snapshot.SessionEnergyKwh:F3} kWh.");
             };
@@ -288,17 +583,44 @@ try
         {
             if (string.Equals(coin.Algorithm, "etchash", StringComparison.OrdinalIgnoreCase))
             {
+                IReadOnlyList<ComputeDeviceId>? selectedComputeDevices = null;
+                if (etcHashOpenClQualification)
+                {
+                    var selected = ComputeDeviceResolver.Resolve(
+                        options, new CudaComputeBackend(), new OpenClComputeBackend());
+                    selectedComputeDevices = selected.Select(device => device.Id).ToArray();
+                    OpenClQualificationGate.EnsureSelectedDevicesPassed(
+                        selectedComputeDevices, qualifiedOpenClDevices);
+                }
                 var session = new EtcHashMiningSession(
                     options,
                     miningLog,
                     statusUpdate,
-                    stopAfterAcceptedShares: etcHashQualification ? 1 : null,
-                    stopAfterDuration: etcHashSoakDuration);
+                    stopAfterAcceptedShares: etcHashQualification || etcHashOpenClQualification ? 1 : null,
+                    stopAfterDuration: soakRequest?.Duration,
+                    selectedComputeDevices: selectedComputeDevices,
+                    pauseController: pauseController);
                 await session.RunAsync(shutdown.Token);
             }
             else if (string.Equals(coin.Algorithm, "kawpow", StringComparison.OrdinalIgnoreCase))
             {
-                var session = new KawPowMiningSession(options, miningLog, statusUpdate);
+                var session = new KawPowMiningSession(
+                    options,
+                    miningLog,
+                    statusUpdate,
+                    stopAfterDuration: soakRequest?.Duration,
+                    pauseController: pauseController);
+                await session.RunAsync(shutdown.Token);
+            }
+            else if (string.Equals(coin.Algorithm, "octopus", StringComparison.OrdinalIgnoreCase) &&
+                octopusQualification)
+            {
+                var session = new OctopusMiningSession(
+                    options,
+                    miningLog,
+                    statusUpdate,
+                    stopAfterAcceptedShares: 1,
+                    pauseController: pauseController);
                 await session.RunAsync(shutdown.Token);
             }
             else
@@ -321,9 +643,19 @@ catch (OperationCanceledException)
     Console.WriteLine("TrMadenci stopped.");
     return 0;
 }
+catch (DllNotFoundException exception)
+{
+    Console.Error.WriteLine($"Native runtime unavailable: {exception.Message}");
+    return 1;
+}
+catch (ComputeWorkerWatchdogException exception)
+{
+    Console.Error.WriteLine($"GPU watchdog stopped mining: {exception.Message}");
+    return ServiceExitCodes.ComputeWatchdogRestartRequired;
+}
 catch (Exception exception)
 {
-    Console.Error.WriteLine($"Invalid configuration: {exception.Message}");
+    Console.Error.WriteLine($"TrMadenci failed: {exception.Message}");
     return 1;
 }
 

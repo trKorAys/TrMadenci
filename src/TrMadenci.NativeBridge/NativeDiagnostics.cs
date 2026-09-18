@@ -9,6 +9,16 @@ public sealed record CudaDeviceInfo(
     int ComputeMajor,
     int ComputeMinor);
 
+public sealed record OpenClDeviceInfo(
+    int PlatformIndex,
+    int DeviceIndex,
+    string PlatformName,
+    string Name,
+    string Vendor,
+    string Version,
+    ulong TotalMemoryBytes,
+    uint ComputeUnits);
+
 public sealed record GpuTelemetry(
     int DeviceIndex,
     uint? TemperatureC,
@@ -35,6 +45,13 @@ public sealed record EtcHashEpochInfo(
 
 public sealed record CudaEpochBuildInfo(
     int EpochNumber,
+    int DeviceIndex,
+    ulong DatasetBytes,
+    TimeSpan BuildTime);
+
+public sealed record OpenClEpochBuildInfo(
+    int EpochNumber,
+    int PlatformIndex,
     int DeviceIndex,
     ulong DatasetBytes,
     TimeSpan BuildTime);
@@ -98,6 +115,32 @@ public sealed class EtcHashCudaEpochContext : IDisposable
     public void Dispose() => _handle.Dispose();
 }
 
+public sealed class EtcHashOpenClEpochContext : IDisposable
+{
+    private readonly NativeDiagnostics.OpenClEpochHandle _handle;
+
+    internal EtcHashOpenClEpochContext(
+        NativeDiagnostics.OpenClEpochHandle handle,
+        OpenClEpochBuildInfo buildInfo)
+    {
+        _handle = handle;
+        BuildInfo = buildInfo;
+    }
+
+    public OpenClEpochBuildInfo BuildInfo { get; }
+
+    public CudaSearchResult Search(
+        int blockNumber,
+        byte[] headerHash,
+        byte[] target,
+        ulong startNonce,
+        uint nonceCount) =>
+        NativeDiagnostics.SearchEtcHashOpenCl(
+            _handle, blockNumber, headerHash, target, startNonce, nonceCount);
+
+    public void Dispose() => _handle.Dispose();
+}
+
 public sealed class OctopusCudaEpochContext : IDisposable
 {
     private readonly NativeDiagnostics.CudaEpochHandle _handle;
@@ -111,6 +154,15 @@ public sealed class OctopusCudaEpochContext : IDisposable
     }
 
     public CudaEpochBuildInfo BuildInfo { get; }
+
+    public CudaSearchResult Search(
+        ulong blockNumber,
+        byte[] headerHash,
+        byte[] target,
+        ulong startNonce,
+        uint nonceCount) =>
+        NativeDiagnostics.SearchOctopusCuda(
+            _handle, blockNumber, headerHash, target, startNonce, nonceCount);
 
     public void Dispose() => _handle.Dispose();
 }
@@ -146,6 +198,99 @@ public static class NativeDiagnostics
                 info.ComputeMinor));
         }
         return result;
+    }
+
+    public static IReadOnlyList<OpenClDeviceInfo> GetOpenClDevices()
+    {
+        var count = NativeMethods.GetOpenClDeviceCount();
+        if (count < 0)
+            throw new InvalidOperationException($"OpenCL device enumeration failed ({count}).");
+
+        var result = new List<OpenClDeviceInfo>(count);
+        for (var index = 0; index < count; index++)
+        {
+            var status = NativeMethods.GetOpenClDeviceInfo(index, out var info);
+            if (status != 0)
+                throw new InvalidOperationException($"OpenCL device {index} query failed ({status}).");
+            result.Add(new OpenClDeviceInfo(
+                info.PlatformIndex,
+                info.DeviceIndex,
+                info.PlatformName,
+                info.Name,
+                info.Vendor,
+                info.Version,
+                info.TotalMemoryBytes,
+                info.ComputeUnits));
+        }
+        return result;
+    }
+
+    public static uint RunOpenClSelfTest(int platformIndex, int deviceIndex)
+    {
+        var status = NativeMethods.OpenClSelfTest(platformIndex, deviceIndex, out var checksum);
+        if (status != 0)
+            throw new InvalidOperationException(
+                $"OpenCL runtime self-test failed on {platformIndex}:{deviceIndex} ({status}).");
+        return checksum;
+    }
+
+    public static void ValidateEtcHashOpenClDagItems(
+        int blockNumber,
+        int platformIndex,
+        int deviceIndex,
+        uint itemCount)
+    {
+        if (itemCount == 0)
+            throw new ArgumentOutOfRangeException(nameof(itemCount));
+        var status = NativeMethods.ValidateEtcHashOpenClDagItems(
+            blockNumber, platformIndex, deviceIndex, itemCount, out var firstMismatch);
+        if (status != 0)
+            throw new InvalidOperationException(
+                $"ETCHash OpenCL DAG validation failed ({status}); first mismatch={firstMismatch}.");
+    }
+
+    public static EtcHashOpenClEpochContext CreateEtcHashOpenClEpoch(
+        int blockNumber,
+        int platformIndex,
+        int deviceIndex)
+    {
+        var status = NativeMethods.CreateEtcHashOpenClEpoch(
+            blockNumber, platformIndex, deviceIndex, out var pointer, out var info);
+        if (status != 0)
+            throw new InvalidOperationException($"ETCHash OpenCL DAG creation failed ({status}).");
+        var handle = new OpenClEpochHandle(pointer);
+        var buildInfo = new OpenClEpochBuildInfo(
+            info.EpochNumber,
+            info.PlatformIndex,
+            info.DeviceIndex,
+            info.DatasetBytes,
+            TimeSpan.FromMilliseconds(info.BuildMilliseconds));
+        return new EtcHashOpenClEpochContext(handle, buildInfo);
+    }
+
+    internal static CudaSearchResult SearchEtcHashOpenCl(
+        OpenClEpochHandle epoch,
+        int blockNumber,
+        byte[] headerHash,
+        byte[] target,
+        ulong startNonce,
+        uint nonceCount)
+    {
+        if (headerHash.Length != 32 || target.Length != 32)
+            throw new ArgumentException("ETCHash header and target must contain exactly 32 bytes.");
+        if (nonceCount == 0)
+            throw new ArgumentOutOfRangeException(nameof(nonceCount));
+        var status = NativeMethods.SearchEtcHashOpenCl(
+            epoch, blockNumber, headerHash, target, startNonce, nonceCount, out var result);
+        if (status != 0)
+            throw new InvalidOperationException($"ETCHash OpenCL nonce search failed ({status}).");
+        return new CudaSearchResult(
+            result.SolutionFound != 0,
+            result.Nonce,
+            result.MixHash,
+            result.FinalHash,
+            result.HashesSearched,
+            TimeSpan.FromMilliseconds(result.SearchMilliseconds));
     }
 
     public static bool TryGetGpuTelemetry(int deviceIndex, out GpuTelemetry? telemetry)
@@ -376,6 +521,32 @@ public static class NativeDiagnostics
             TimeSpan.FromMilliseconds(result.SearchMilliseconds));
     }
 
+    internal static CudaSearchResult SearchOctopusCuda(
+        CudaEpochHandle epoch,
+        ulong blockNumber,
+        byte[] headerHash,
+        byte[] target,
+        ulong startNonce,
+        uint nonceCount)
+    {
+        if (headerHash.Length != 32 || target.Length != 32)
+            throw new ArgumentException("Octopus header and target must contain exactly 32 bytes.");
+        if (nonceCount == 0)
+            throw new ArgumentOutOfRangeException(nameof(nonceCount));
+
+        var status = NativeMethods.SearchOctopusCuda(
+            epoch, blockNumber, headerHash, target, startNonce, nonceCount, out var result);
+        if (status != 0)
+            throw NativeFailure("Octopus CUDA nonce search", status);
+        return new CudaSearchResult(
+            result.SolutionFound != 0,
+            result.Nonce,
+            result.MixHash,
+            result.FinalHash,
+            result.HashesSearched,
+            TimeSpan.FromMilliseconds(result.SearchMilliseconds));
+    }
+
     private static InvalidOperationException NativeFailure(string operation, int status)
     {
         var pointer = NativeMethods.GetLastError();
@@ -394,6 +565,27 @@ public static class NativeDiagnostics
         public ulong TotalMemoryBytes;
         public int ComputeMajor;
         public int ComputeMinor;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+    private struct NativeOpenClDeviceInfo
+    {
+        public int PlatformIndex;
+        public int DeviceIndex;
+        public ulong TotalMemoryBytes;
+        public uint ComputeUnits;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string PlatformName;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+        public string Name;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string Vendor;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string Version;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -441,6 +633,16 @@ public static class NativeDiagnostics
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct NativeOpenClEpochBuildInfo
+    {
+        public int EpochNumber;
+        public int PlatformIndex;
+        public int DeviceIndex;
+        public ulong DatasetBytes;
+        public double BuildMilliseconds;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct NativeSearchResult
     {
         public int SolutionFound;
@@ -465,6 +667,44 @@ public static class NativeDiagnostics
 
         [DllImport(Library, EntryPoint = "trmadenci_get_device_info", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
         public static extern int GetDeviceInfo(int index, out NativeDeviceInfo info);
+
+        [DllImport(Library, EntryPoint = "trmadenci_get_opencl_device_count", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int GetOpenClDeviceCount();
+
+        [DllImport(Library, EntryPoint = "trmadenci_get_opencl_device_info", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern int GetOpenClDeviceInfo(int index, out NativeOpenClDeviceInfo info);
+
+        [DllImport(Library, EntryPoint = "trmadenci_opencl_self_test", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int OpenClSelfTest(int platformIndex, int deviceIndex, out uint checksum);
+
+        [DllImport(Library, EntryPoint = "trmadenci_validate_etchash_opencl_dag_items", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int ValidateEtcHashOpenClDagItems(
+            int blockNumber,
+            int platformIndex,
+            int deviceIndex,
+            uint itemCount,
+            out uint firstMismatch);
+
+        [DllImport(Library, EntryPoint = "trmadenci_create_etchash_opencl_epoch", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int CreateEtcHashOpenClEpoch(
+            int blockNumber,
+            int platformIndex,
+            int deviceIndex,
+            out IntPtr epoch,
+            out NativeOpenClEpochBuildInfo buildInfo);
+
+        [DllImport(Library, EntryPoint = "trmadenci_destroy_etchash_opencl_epoch", CallingConvention = CallingConvention.Cdecl)]
+        public static extern void DestroyEtcHashOpenClEpoch(IntPtr epoch);
+
+        [DllImport(Library, EntryPoint = "trmadenci_search_etchash_opencl", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int SearchEtcHashOpenCl(
+            OpenClEpochHandle epoch,
+            int blockNumber,
+            [In, MarshalAs(UnmanagedType.LPArray, SizeConst = 32)] byte[] headerHash,
+            [In, MarshalAs(UnmanagedType.LPArray, SizeConst = 32)] byte[] target,
+            ulong startNonce,
+            uint nonceCount,
+            out NativeSearchResult result);
 
         [DllImport(Library, EntryPoint = "trmadenci_get_gpu_telemetry", CallingConvention = CallingConvention.Cdecl)]
         public static extern int GetGpuTelemetry(int deviceIndex, out NativeGpuTelemetry telemetry);
@@ -557,6 +797,16 @@ public static class NativeDiagnostics
             uint nonceCount,
             out NativeSearchResult result);
 
+        [DllImport(Library, EntryPoint = "trmadenci_search_octopus_cuda", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int SearchOctopusCuda(
+            CudaEpochHandle epoch,
+            ulong blockNumber,
+            [In, MarshalAs(UnmanagedType.LPArray, SizeConst = 32)] byte[] headerHash,
+            [In, MarshalAs(UnmanagedType.LPArray, SizeConst = 32)] byte[] target,
+            ulong startNonce,
+            uint nonceCount,
+            out NativeSearchResult result);
+
         [DllImport(Library, EntryPoint = "trmadenci_get_last_error", CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr GetLastError();
     }
@@ -570,6 +820,19 @@ public static class NativeDiagnostics
         protected override bool ReleaseHandle()
         {
             NativeMethods.DestroyCudaEpoch(handle);
+            return true;
+        }
+    }
+
+    internal sealed class OpenClEpochHandle : SafeHandle
+    {
+        public OpenClEpochHandle(IntPtr pointer) : base(IntPtr.Zero, ownsHandle: true) => SetHandle(pointer);
+
+        public override bool IsInvalid => handle == IntPtr.Zero;
+
+        protected override bool ReleaseHandle()
+        {
+            NativeMethods.DestroyEtcHashOpenClEpoch(handle);
             return true;
         }
     }

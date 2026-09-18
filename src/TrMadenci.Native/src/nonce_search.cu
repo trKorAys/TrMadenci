@@ -850,6 +850,239 @@ __global__ void etchash_final_kernel(
     }
 }
 
+__device__ __forceinline__ uint32_t octopus_gcd(uint32_t left, uint32_t right)
+{
+    while (right != 0)
+    {
+        const auto remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    return left;
+}
+
+__device__ uint32_t octopus_power_mod(uint32_t value, uint32_t exponent)
+{
+    constexpr uint32_t modulus = 1032193;
+    uint64_t factor = value;
+    uint64_t result = 1;
+    while (exponent != 0)
+    {
+        if ((exponent & 1u) != 0)
+            result = result * factor % modulus;
+        factor = factor * factor % modulus;
+        exponent >>= 1;
+    }
+    return static_cast<uint32_t>(result);
+}
+
+__device__ uint32_t octopus_remap(uint64_t value)
+{
+    constexpr uint32_t modulus = 1032193;
+    auto exponent = static_cast<uint32_t>(value % (modulus - 2u) + 1u);
+    while (true)
+    {
+        const auto divisor = octopus_gcd(exponent, modulus - 1u);
+        if (divisor == 1)
+            break;
+        exponent /= divisor;
+    }
+    return octopus_power_mod(11, exponent);
+}
+
+struct octopus_sip_state
+{
+    uint64_t v0;
+    uint64_t v1;
+    uint64_t v2;
+    uint64_t v3;
+
+    __device__ void round()
+    {
+        v0 += v1;
+        v2 += v3;
+        v1 = rotate_left64(v1, 13);
+        v3 = rotate_left64(v3, 16);
+        v1 ^= v0;
+        v3 ^= v2;
+        v0 = rotate_left64(v0, 32);
+        v2 += v1;
+        v0 += v3;
+        v1 = rotate_left64(v1, 17);
+        v3 = rotate_left64(v3, 21);
+        v1 ^= v2;
+        v3 ^= v0;
+        v2 = rotate_left64(v2, 32);
+    }
+
+    __device__ void hash24(const uint64_t value)
+    {
+        v3 ^= value;
+        round();
+        round();
+        v0 ^= value;
+        v2 ^= 0xff;
+        round();
+        round();
+        round();
+        round();
+    }
+};
+
+// Correctness-first Octopus kernel: one CUDA warp evaluates one nonce. Lanes
+// cooperatively create the 1024 polynomial coefficients and read one 256-byte
+// DAG page coalesced as two words per lane.
+__global__ void octopus_search_kernel(
+    const uint32_t* dataset,
+    const uint32_t full_dataset_pages,
+    const uint32_t* header,
+    const uint8_t* target,
+    const uint64_t start_nonce,
+    const uint32_t nonce_count,
+    trmadenci_search_result* result)
+{
+    constexpr uint32_t modulus = 1032193;
+    constexpr uint32_t warp_size = 32;
+    __shared__ uint32_t coefficients[1024];
+    __shared__ uint32_t shared_mix[64];
+    __shared__ uint32_t reduced_mix[8];
+    __shared__ uint32_t seed_words[16];
+
+    const auto lane = threadIdx.x;
+    const auto nonce_index = blockIdx.x;
+    if (lane >= warp_size || nonce_index >= nonce_count || result->solution_found != 0)
+        return;
+    const auto nonce = start_nonce + nonce_index;
+    const auto v0 = static_cast<uint64_t>(header[0]) | (static_cast<uint64_t>(header[1]) << 32);
+    const auto v1 = static_cast<uint64_t>(header[2]) | (static_cast<uint64_t>(header[3]) << 32);
+    const auto v2 = static_cast<uint64_t>(header[4]) | (static_cast<uint64_t>(header[5]) << 32);
+    const auto v3 = static_cast<uint64_t>(header[6]) | (static_cast<uint64_t>(header[7]) << 32);
+
+    const auto a = octopus_remap(v0);
+    const auto b = octopus_remap(v1);
+    auto c_input = v2;
+    auto c = octopus_remap(c_input);
+    while (static_cast<uint64_t>(b) * b % modulus ==
+        4ULL * a * c % modulus)
+        c = octopus_remap(++c_input);
+    const auto w = octopus_remap(v3);
+
+    octopus_sip_state sip{v0, v1, v2, v3};
+    const auto warp_start = nonce / warp_size * warp_size;
+    sip.hash24(warp_start + lane);
+#pragma unroll
+    for (uint32_t access = 0; access < 32; ++access)
+    {
+        sip.round();
+        coefficients[access * warp_size + lane] =
+            static_cast<uint32_t>((sip.v0 ^ sip.v1 ^ sip.v2 ^ sip.v3) & 0xffffffffULL) % modulus;
+    }
+    __syncwarp();
+
+    const auto nonce_lane = static_cast<uint32_t>(nonce % warp_size);
+    const auto w2 = static_cast<uint32_t>(static_cast<uint64_t>(w) * w % modulus);
+    auto w_power = octopus_power_mod(w, nonce_lane);
+    auto w2_power = octopus_power_mod(w2, nonce_lane);
+    const auto warp_w_power = octopus_power_mod(w, warp_size);
+    const auto warp_w2_power = octopus_power_mod(w2, warp_size);
+    for (uint32_t point = 0; point < lane; ++point)
+    {
+        w_power = static_cast<uint32_t>(static_cast<uint64_t>(w_power) * warp_w_power % modulus);
+        w2_power = static_cast<uint32_t>(static_cast<uint64_t>(w2_power) * warp_w2_power % modulus);
+    }
+    const auto x = static_cast<uint32_t>(
+        (static_cast<uint64_t>(a) * w2_power + static_cast<uint64_t>(b) * w_power + c) % modulus);
+    uint32_t point_value = 0;
+    for (int coefficient = 1023; coefficient >= 0; --coefficient)
+        point_value = static_cast<uint32_t>(
+            (static_cast<uint64_t>(point_value) * x + coefficients[coefficient]) % modulus);
+    coefficients[lane] = point_value;
+    __syncwarp();
+
+    uint64_t compressed = 0;
+    if (lane == 0)
+    {
+#pragma unroll
+        for (uint32_t point = 0; point < 32; ++point)
+            compressed = compressed * 0x01000193ULL ^ coefficients[point];
+
+        uint64_t state[25]{};
+        state[0] = v0;
+        state[1] = v1;
+        state[2] = v2;
+        state[3] = v3;
+        state[4] = compressed;
+        state[5] = 0x0000000000000001ULL;
+        state[8] = 0x8000000000000000ULL;
+        keccak_f1600(state);
+#pragma unroll
+        for (uint32_t word = 0; word < 16; ++word)
+            seed_words[word] = static_cast<uint32_t>(state[word / 2] >> ((word & 1) * 32));
+    }
+    __syncwarp();
+
+    uint32_t mix0 = seed_words[(lane * 2) & 15u];
+    uint32_t mix1 = seed_words[(lane * 2 + 1) & 15u];
+#pragma unroll 1
+    for (uint32_t access = 0; access < 32; ++access)
+    {
+        const auto owner = access / 2;
+        const auto selected_mix = __shfl_sync(
+            0xffffffffu, (access & 1u) == 0 ? mix0 : mix1, owner);
+        const auto selected_point = __shfl_sync(0xffffffffu, point_value, access);
+        const auto page = (((seed_words[0] ^ access ^ selected_point) * fnv_prime) ^ selected_mix) %
+            full_dataset_pages;
+        const auto* data = dataset + static_cast<uint64_t>(page) * 64 + lane * 2;
+        mix0 = (mix0 * fnv_prime) ^ data[0];
+        mix1 = (mix1 * fnv_prime) ^ data[1];
+    }
+    shared_mix[lane * 2] = mix0;
+    shared_mix[lane * 2 + 1] = mix1;
+    __syncwarp();
+
+    if (lane < 8)
+    {
+        const auto first = lane * 4;
+        auto low = (shared_mix[first] * fnv_prime) ^ shared_mix[first + 1];
+        low = (low * fnv_prime) ^ shared_mix[first + 2];
+        low = (low * fnv_prime) ^ shared_mix[first + 3];
+        const auto second = first + 32;
+        auto high = (shared_mix[second] * fnv_prime) ^ shared_mix[second + 1];
+        high = (high * fnv_prime) ^ shared_mix[second + 2];
+        high = (high * fnv_prime) ^ shared_mix[second + 3];
+        reduced_mix[lane] = (low * fnv_prime) ^ high;
+    }
+    __syncwarp();
+
+    if (lane != 0)
+        return;
+    uint64_t final_state[25]{};
+#pragma unroll
+    for (uint32_t word = 0; word < 8; ++word)
+        final_state[word] = static_cast<uint64_t>(seed_words[word * 2]) |
+            (static_cast<uint64_t>(seed_words[word * 2 + 1]) << 32);
+#pragma unroll
+    for (uint32_t word = 0; word < 4; ++word)
+        final_state[word + 8] = static_cast<uint64_t>(reduced_mix[word * 2]) |
+            (static_cast<uint64_t>(reduced_mix[word * 2 + 1]) << 32);
+    final_state[12] = 0x0000000000000001ULL;
+    final_state[16] = 0x8000000000000000ULL;
+    keccak_f1600(final_state);
+    uint32_t final_hash[8];
+#pragma unroll
+    for (uint32_t word = 0; word < 8; ++word)
+        final_hash[word] = static_cast<uint32_t>(final_state[word / 2] >> ((word & 1) * 32));
+    if (!meets_target(final_hash, target) || atomicCAS(&result->solution_found, 0, 1) != 0)
+        return;
+    result->nonce = nonce;
+#pragma unroll
+    for (uint32_t word = 0; word < 8; ++word)
+    {
+        reinterpret_cast<uint32_t*>(result->mix_hash)[word] = reduced_mix[word];
+        reinterpret_cast<uint32_t*>(result->final_hash)[word] = final_hash[word];
+    }
+}
+
 // One eight-lane group evaluates one nonce. Each lane owns four consecutive
 // mix words, turning every 128-byte DAG lookup into eight adjacent 16-byte
 // reads instead of a single thread issuing all 32 scattered word loads.
@@ -1124,7 +1357,7 @@ int32_t cuda_failure(const cudaError_t status)
     return status == cudaSuccess ? 0 : -2000 - static_cast<int32_t>(status);
 }
 
-cudaError_t ensure_search_buffers(trmadenci_cuda_epoch* epoch, const uint32_t nonce_count)
+cudaError_t ensure_common_search_buffers(trmadenci_cuda_epoch* epoch)
 {
     auto status = cudaSuccess;
     if (epoch->search_header == nullptr)
@@ -1133,6 +1366,12 @@ cudaError_t ensure_search_buffers(trmadenci_cuda_epoch* epoch, const uint32_t no
         status = cudaMalloc(&epoch->search_target, 32);
     if (status == cudaSuccess && epoch->search_result == nullptr)
         status = cudaMalloc(&epoch->search_result, sizeof(trmadenci_search_result));
+    return status;
+}
+
+cudaError_t ensure_search_buffers(trmadenci_cuda_epoch* epoch, const uint32_t nonce_count)
+{
+    auto status = ensure_common_search_buffers(epoch);
     if (status != cudaSuccess || epoch->search_capacity >= nonce_count)
         return status;
 
@@ -1307,6 +1546,59 @@ int32_t trmadenci_search_etchash_cuda(
         status = cudaDeviceSynchronize();
     const auto finished = std::chrono::steady_clock::now();
 
+    *result = {};
+    if (status == cudaSuccess)
+        status = cudaMemcpy(result, device_result, sizeof(*result), cudaMemcpyDeviceToHost);
+    if (status != cudaSuccess)
+        return cuda_failure(status);
+    result->hashes_searched = nonce_count;
+    result->search_milliseconds =
+        std::chrono::duration<double, std::milli>(finished - started).count();
+    return 0;
+}
+
+int32_t trmadenci_search_octopus_cuda(
+    trmadenci_cuda_epoch* epoch,
+    const uint64_t block_number,
+    const uint8_t header_hash[32],
+    const uint8_t target[32],
+    const uint64_t start_nonce,
+    const uint32_t nonce_count,
+    trmadenci_search_result* result)
+{
+    constexpr uint64_t epoch_length = uint64_t{1} << 19;
+    if (epoch == nullptr || epoch->algorithm_kind != 3 || header_hash == nullptr ||
+        target == nullptr || nonce_count == 0 || result == nullptr ||
+        block_number / epoch_length != static_cast<uint64_t>(epoch->epoch_number))
+        return -1;
+
+    auto status = cudaSetDevice(epoch->device_index);
+    if (status == cudaSuccess)
+        status = ensure_common_search_buffers(epoch);
+    auto* device_result = static_cast<trmadenci_search_result*>(epoch->search_result);
+    if (status == cudaSuccess)
+        status = cudaMemcpy(epoch->search_header, header_hash, 32, cudaMemcpyHostToDevice);
+    if (status == cudaSuccess)
+        status = cudaMemcpy(epoch->search_target, target, 32, cudaMemcpyHostToDevice);
+    if (status == cudaSuccess)
+        status = cudaMemset(device_result, 0, sizeof(trmadenci_search_result));
+
+    const auto started = std::chrono::steady_clock::now();
+    if (status == cudaSuccess)
+    {
+        octopus_search_kernel<<<nonce_count, 32>>>(
+            epoch->dataset,
+            epoch->full_dataset_items,
+            epoch->search_header,
+            epoch->search_target,
+            start_nonce,
+            nonce_count,
+            device_result);
+        status = cudaGetLastError();
+    }
+    if (status == cudaSuccess)
+        status = cudaDeviceSynchronize();
+    const auto finished = std::chrono::steady_clock::now();
     *result = {};
     if (status == cudaSuccess)
         status = cudaMemcpy(result, device_result, sizeof(*result), cudaMemcpyDeviceToHost);

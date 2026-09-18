@@ -8,5 +8,7 @@
     "password": "x"
   },
   "failoverPool": null,
+  "computeBackend": "auto",
+  "computeDevices": [],
   "gpuDevices": [0]
 }

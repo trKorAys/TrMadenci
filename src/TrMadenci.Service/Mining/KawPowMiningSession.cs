@@ -8,7 +8,9 @@ namespace TrMadenci.Service.Mining;
 internal sealed class KawPowMiningSession(
     MinerOptions options,
     Action<string> log,
-    Action<MiningStatusSnapshot>? updateStatus = null)
+    Action<MiningStatusSnapshot>? updateStatus = null,
+    TimeSpan? stopAfterDuration = null,
+    MiningPauseController? pauseController = null)
 {
     private readonly CoinProfile _coin = CoinProfileCatalog.GetRequired(options.Coin);
     private readonly object _workGate = new();
@@ -19,14 +21,18 @@ internal sealed class KawPowMiningSession(
     private KawPowPoolWork? _latestUserWork;
     private KawPowPoolWork? _latestDeveloperWork;
     private long _accepted;
+    private long _acceptedUser;
+    private long _acceptedDeveloper;
     private long _rejected;
     private long _invalid;
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        var devices = options.GpuDevices.Length == 0
+        var sessionToken = cancellationToken;
+        var configuredDevices = options.GetCudaDeviceIndexes();
+        var devices = configuredDevices.Length == 0
             ? NativeDiagnostics.GetCudaDevices().Select(device => device.Index).ToArray()
-            : options.GpuDevices;
+            : configuredDevices;
         if (devices.Length == 0)
             throw new InvalidOperationException("No CUDA device was selected.");
 
@@ -46,15 +52,22 @@ internal sealed class KawPowMiningSession(
             worker.Start();
             _workers.Add(worker);
         }
+        if (pauseController is not null)
+        {
+            pauseController.StateChanged += OnPauseStateChanged;
+            if (pauseController.IsPaused)
+                PauseWorkers();
+        }
 
         log($"Connecting user pool {userPoolOptions.Host}:{userPoolOptions.Port} and same-coin " +
             $"developer pool; coin={_coin.Ticker}, algorithm={_coin.Algorithm.ToUpperInvariant()}, " +
             $"fee={ProductPolicy.DeveloperFeeRate:P2}.");
         await Task.WhenAll(
-            userPool.ConnectAsync(cancellationToken),
-            developerPool.ConnectAsync(cancellationToken));
+            userPool.ConnectAsync(sessionToken),
+            developerPool.ConnectAsync(sessionToken));
 
         var feeClock = Stopwatch.StartNew();
+        var soakPausedBaseline = pauseController?.TotalPausedDuration ?? TimeSpan.Zero;
         var lastFeeTick = feeClock.Elapsed;
         var statusClock = Stopwatch.StartNew();
         var lastStatus = TimeSpan.Zero;
@@ -68,12 +81,13 @@ internal sealed class KawPowMiningSession(
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
-            while (await timer.WaitForNextTickAsync(cancellationToken))
+            while (await timer.WaitForNextTickAsync(sessionToken))
             {
+                ComputeWorkerWatchdog.ThrowIfUnhealthy(_workers.Select(worker => worker.Health));
                 var now = feeClock.Elapsed;
                 var elapsed = now - lastFeeTick;
                 lastFeeTick = now;
-                if (_workers.Any(worker => worker.IsHashing))
+                if (pauseController?.IsPaused != true && _workers.Any(worker => worker.IsHashing))
                 {
                     activeMiningTime += elapsed;
                     var previous = _scheduler.Beneficiary;
@@ -97,9 +111,17 @@ internal sealed class KawPowMiningSession(
                     {
                         var workerHashes = worker.Hashes;
                         var workerRate = (workerHashes - lastWorkerHashes[worker.DeviceIndex]) / deltaSeconds;
+                        var health = worker.Health;
                         NativeDiagnostics.TryGetGpuTelemetry(worker.DeviceIndex, out var telemetry);
                         gpuStatuses.Add(new GpuMiningStatus(
-                            worker.DeviceIndex, worker.IsPreparing, workerRate, telemetry));
+                            worker.DeviceIndex,
+                            worker.IsPreparing,
+                            workerRate,
+                            telemetry,
+                            $"cuda:{worker.DeviceIndex}",
+                            health.Phase,
+                            health.TotalRecoveries,
+                            health.LastError));
                         lastWorkerHashes[worker.DeviceIndex] = workerHashes;
                     }
                     var measuredPower = gpuStatuses
@@ -138,7 +160,10 @@ internal sealed class KawPowMiningSession(
                         invalid,
                         sessionEnergyWattHours / 1000,
                         averagePower,
-                        gpuStatuses);
+                        gpuStatuses,
+                        pauseController?.IsPaused == true,
+                        Interlocked.Read(ref _acceptedUser),
+                        Interlocked.Read(ref _acceptedDeveloper));
                     if (updateStatus is null)
                     {
                         log($"Hashrate {rate / 1_000_000:F2} MH/s | shares {accepted}/{rejected} | beneficiary {_scheduler.Beneficiary}");
@@ -155,13 +180,22 @@ internal sealed class KawPowMiningSession(
 
                 if (now - lastPersist >= TimeSpan.FromSeconds(30))
                 {
-                    await DeveloperFeeStateStore.SaveAsync(_scheduler.Snapshot(), cancellationToken);
+                    await DeveloperFeeStateStore.SaveAsync(_scheduler.Snapshot(), sessionToken);
                     lastPersist = now;
+                }
+
+                if (stopAfterDuration is { } duration &&
+                    GetSoakElapsed(now, soakPausedBaseline) >= duration)
+                {
+                    log($"KAWPOW soak duration completed: {stopAfterDuration} active test time.");
+                    break;
                 }
             }
         }
         finally
         {
+            if (pauseController is not null)
+                pauseController.StateChanged -= OnPauseStateChanged;
             await DeveloperFeeStateStore.SaveAsync(_scheduler.Snapshot(), CancellationToken.None);
             foreach (var worker in _workers)
                 await worker.DisposeAsync();
@@ -178,7 +212,7 @@ internal sealed class KawPowMiningSession(
             else
                 _latestDeveloperWork = work;
 
-            if (work.Beneficiary != _scheduler.Beneficiary)
+            if (work.Beneficiary != _scheduler.Beneficiary || pauseController?.IsPaused == true)
                 return;
             foreach (var worker in _workers)
                 worker.Assign(work);
@@ -190,6 +224,11 @@ internal sealed class KawPowMiningSession(
     {
         lock (_workGate)
         {
+            if (pauseController?.IsPaused == true)
+            {
+                PauseWorkers();
+                return;
+            }
             var work = beneficiary == MiningBeneficiary.User
                 ? _latestUserWork
                 : _latestDeveloperWork;
@@ -204,6 +243,30 @@ internal sealed class KawPowMiningSession(
                 worker.Assign(work);
         }
     }
+
+    private void OnPauseStateChanged(MiningPauseSnapshot state)
+    {
+        if (pauseController!.IsPaused)
+        {
+            lock (_workGate)
+                PauseWorkers();
+            log($"Mining manually paused; pool connections remain active (pause #{state.PauseCount}).");
+            return;
+        }
+
+        log($"Mining resumed after {state.TotalPausedDuration:c} total manual pause time.");
+        SelectCurrentWork(_scheduler.Beneficiary);
+    }
+
+    private void PauseWorkers()
+    {
+        foreach (var worker in _workers)
+            worker.Pause();
+    }
+
+    private TimeSpan GetSoakElapsed(TimeSpan wallClockElapsed, TimeSpan pausedDurationBaseline) =>
+        pauseController?.GetUnpausedElapsed(wallClockElapsed, pausedDurationBaseline) ??
+        wallClockElapsed;
 
     private void OnConnectionLost(KawPowPoolClient pool)
     {
@@ -240,6 +303,10 @@ internal sealed class KawPowMiningSession(
         if (accepted)
         {
             var count = Interlocked.Increment(ref _accepted);
+            if (work.Beneficiary == MiningBeneficiary.User)
+                Interlocked.Increment(ref _acceptedUser);
+            else
+                Interlocked.Increment(ref _acceptedDeveloper);
             log($"Share #{count} ACCEPTED [{work.Beneficiary}] nonce=0x{share.Nonce:x16}.");
         }
         else

@@ -1,0 +1,41 @@
+Yerel bilgisayarının durumu:
+- NVIDIA RTX 3060 12 GB: uygun
+- NVIDIA sürücüsü: uygun
+- WSL2 Linux dağıtımı: kurulu değil
+- Docker Desktop: kurulu değil
+- Virtualenv gerekmiyor.
+1. WSL2 kurulumu
+Yönetici PowerShell aç:
+wsl --install -d Ubuntu-22.04
+Ardından bilgisayarı yeniden başlat. Microsoft WSL kurulum rehberi
+2. Docker Desktop
+Docker Desktop’ı kurup WSL2 engine’i etkinleştir: Docker Desktop GPU desteği
+Sonra GPU erişimini doğrula:
+docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
+Çıktıda NVIDIA GeForce RTX 3060 görünmeli.
+3. YatırımIQ CUDA kontrolü
+cd D:\Projeler\Web\YatirimIQ\backend
+
+.\scripts\runMetaV5LocalCudaDocker.ps1 `
+  -Command check `
+  -RebuildImage
+İlk çalıştırmada CUDA destekli LightGBM image’ı derlenecek. Gerçek LightGBM CUDA, Linux/WSL2 gerektiriyor. LightGBM kurulum sözleşmesi
+4. Eğitim akışı
+Yeni kod deploy edildikten ve güncel dataset hazırlandıktan sonra sunucuda:
+cd /root/WebSite/YatirimIQ/backend
+
+npm run ml:local:cuda -- export \
+  --market-class=BIST \
+  --destination=/root/meta-v5-transfer/bist-package
+Paket yerel bilgisayara indirildikten sonra:
+.\scripts\runMetaV5LocalCudaDocker.ps1 `
+  -Command train `
+  -PackagePath D:\MetaV5\bist-package
+Ardından:
+.\scripts\runMetaV5LocalCudaDocker.ps1 `
+  -Command verify `
+  -PackagePath D:\MetaV5\bist-package
+Doğrulanan paket sunucuya yüklenip, aktif/bekleyen başka ML koşumu yokken içe alınır:
+npm run ml:local:cuda -- import \
+  --package=/root/meta-v5-transfer/bist-package
+RTX 3060 için varsayılan sınırlar 26 GB Docker, 24 GB Python belleği olarak ayarlandı. CUDA yalnız LightGBM bölümünü hızlandıracak; Ridge, preprocessing ve raporlama CPU’da kalacak.

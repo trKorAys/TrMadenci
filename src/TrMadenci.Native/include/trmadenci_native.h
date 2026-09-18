@@ -23,6 +23,18 @@ struct trmadenci_device_info
     int32_t compute_minor;
 };
 
+struct trmadenci_opencl_device_info
+{
+    int32_t platform_index;
+    int32_t device_index;
+    uint64_t total_memory_bytes;
+    uint32_t compute_units;
+    char platform_name[128];
+    char name[256];
+    char vendor[128];
+    char version[128];
+};
+
 enum trmadenci_gpu_telemetry_field : uint32_t
 {
     TRMADENCI_TELEMETRY_TEMPERATURE = 1u << 0,
@@ -65,10 +77,20 @@ struct trmadenci_etchash_epoch_info
 };
 
 struct trmadenci_cuda_epoch;
+struct trmadenci_opencl_etchash_epoch;
 
 struct trmadenci_cuda_epoch_build_info
 {
     int32_t epoch_number;
+    int32_t device_index;
+    uint64_t dataset_bytes;
+    double build_milliseconds;
+};
+
+struct trmadenci_opencl_epoch_build_info
+{
+    int32_t epoch_number;
+    int32_t platform_index;
     int32_t device_index;
     uint64_t dataset_bytes;
     double build_milliseconds;
@@ -86,6 +108,36 @@ struct trmadenci_search_result
 
 TRMADENCI_API int32_t trmadenci_get_device_count();
 TRMADENCI_API int32_t trmadenci_get_device_info(int32_t index, trmadenci_device_info* info);
+TRMADENCI_API int32_t trmadenci_get_opencl_device_count();
+TRMADENCI_API int32_t trmadenci_get_opencl_device_info(
+    int32_t index,
+    trmadenci_opencl_device_info* info);
+TRMADENCI_API int32_t trmadenci_opencl_self_test(
+    int32_t platform_index,
+    int32_t device_index,
+    uint32_t* checksum);
+TRMADENCI_API int32_t trmadenci_validate_etchash_opencl_dag_items(
+    int32_t block_number,
+    int32_t platform_index,
+    int32_t device_index,
+    uint32_t item_count,
+    uint32_t* first_mismatch);
+TRMADENCI_API int32_t trmadenci_create_etchash_opencl_epoch(
+    int32_t block_number,
+    int32_t platform_index,
+    int32_t device_index,
+    struct trmadenci_opencl_etchash_epoch** epoch,
+    struct trmadenci_opencl_epoch_build_info* build_info);
+TRMADENCI_API void trmadenci_destroy_etchash_opencl_epoch(
+    struct trmadenci_opencl_etchash_epoch* epoch);
+TRMADENCI_API int32_t trmadenci_search_etchash_opencl(
+    struct trmadenci_opencl_etchash_epoch* epoch,
+    int32_t block_number,
+    const uint8_t header_hash[32],
+    const uint8_t target[32],
+    uint64_t start_nonce,
+    uint32_t nonce_count,
+    struct trmadenci_search_result* result);
 TRMADENCI_API int32_t trmadenci_get_gpu_telemetry(
     int32_t device_index,
     trmadenci_gpu_telemetry* telemetry);
@@ -154,6 +206,14 @@ TRMADENCI_API int32_t trmadenci_search_cuda(
 TRMADENCI_API int32_t trmadenci_search_etchash_cuda(
     struct trmadenci_cuda_epoch* epoch,
     int32_t block_number,
+    const uint8_t header_hash[32],
+    const uint8_t target[32],
+    uint64_t start_nonce,
+    uint32_t nonce_count,
+    struct trmadenci_search_result* result);
+TRMADENCI_API int32_t trmadenci_search_octopus_cuda(
+    struct trmadenci_cuda_epoch* epoch,
+    uint64_t block_number,
     const uint8_t header_hash[32],
     const uint8_t target[32],
     uint64_t start_nonce,

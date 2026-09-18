@@ -10,17 +10,21 @@ internal sealed class EtcHashMiningSession(
     Action<string> log,
     Action<MiningStatusSnapshot>? updateStatus = null,
     int? stopAfterAcceptedShares = null,
-    TimeSpan? stopAfterDuration = null)
+    TimeSpan? stopAfterDuration = null,
+    IReadOnlyList<ComputeDeviceId>? selectedComputeDevices = null,
+    MiningPauseController? pauseController = null)
 {
     private readonly CoinProfile _coin = CoinProfileCatalog.GetRequired(options.Coin);
     private readonly object _workGate = new();
     private readonly DeveloperFeeScheduler _scheduler = new(
         ProductPolicy.CreateDeveloperFeePolicy(),
         state: DeveloperFeeStateStore.Load(log));
-    private readonly List<CudaEtcHashWorker> _workers = [];
+    private readonly List<EtcHashWorker> _workers = [];
     private EtcHashPoolWork? _latestUserWork;
     private EtcHashPoolWork? _latestDeveloperWork;
     private long _accepted;
+    private long _acceptedUser;
+    private long _acceptedDeveloper;
     private long _rejected;
     private long _invalid;
     private CancellationTokenSource? _sessionLifetime;
@@ -29,15 +33,18 @@ internal sealed class EtcHashMiningSession(
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         using var sessionLifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        if (stopAfterDuration is { } duration)
-            sessionLifetime.CancelAfter(duration);
         _sessionLifetime = sessionLifetime;
         var sessionToken = sessionLifetime.Token;
-        var devices = options.GpuDevices.Length == 0
-            ? NativeDiagnostics.GetCudaDevices().Select(device => device.Index).ToArray()
-            : options.GpuDevices;
-        if (devices.Length == 0)
-            throw new InvalidOperationException("No CUDA device was selected.");
+        var configuredDevices = options.GetCudaDeviceIndexes();
+        var devices = selectedComputeDevices ?? (configuredDevices.Length == 0
+            ? NativeDiagnostics.GetCudaDevices()
+                .Select(device => new ComputeDeviceId(ComputeBackendKind.Cuda, 0, device.Index))
+                .ToArray()
+            : configuredDevices
+                .Select(device => new ComputeDeviceId(ComputeBackendKind.Cuda, 0, device))
+                .ToArray());
+        if (devices.Count == 0)
+            throw new InvalidOperationException("No compute device was selected.");
 
         await using var userPool = new EtcHashPoolClient(
             options.Pool, MiningBeneficiary.User, log, options.FailoverPool);
@@ -50,9 +57,15 @@ internal sealed class EtcHashMiningSession(
 
         foreach (var device in devices)
         {
-            var worker = new CudaEtcHashWorker(device, SubmitAsync, log);
+            var worker = new EtcHashWorker(device, SubmitAsync, log);
             worker.Start();
             _workers.Add(worker);
+        }
+        if (pauseController is not null)
+        {
+            pauseController.StateChanged += OnPauseStateChanged;
+            if (pauseController.IsPaused)
+                PauseWorkers();
         }
 
         log($"Connecting user pool {options.Pool.Host}:{options.Pool.Port} and same-coin " +
@@ -63,12 +76,13 @@ internal sealed class EtcHashMiningSession(
             developerPool.ConnectAsync(sessionToken));
 
         var clock = Stopwatch.StartNew();
+        var soakPausedBaseline = pauseController?.TotalPausedDuration ?? TimeSpan.Zero;
         var lastTick = clock.Elapsed;
         var lastStatus = TimeSpan.Zero;
         var lastPersist = TimeSpan.Zero;
         var activeMiningTime = TimeSpan.Zero;
         ulong lastHashes = 0;
-        var lastWorkerHashes = _workers.ToDictionary(worker => worker.DeviceIndex, worker => worker.Hashes);
+        var lastWorkerHashes = _workers.ToDictionary(worker => worker.DeviceId, worker => worker.Hashes);
         double sessionEnergyWattHours = 0;
         double telemetryMeasuredSeconds = 0;
 
@@ -77,10 +91,11 @@ internal sealed class EtcHashMiningSession(
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
             while (await timer.WaitForNextTickAsync(sessionToken))
             {
+                ComputeWorkerWatchdog.ThrowIfUnhealthy(_workers.Select(worker => worker.Health));
                 var now = clock.Elapsed;
                 var elapsed = now - lastTick;
                 lastTick = now;
-                if (_workers.Any(worker => worker.IsHashing))
+                if (pauseController?.IsPaused != true && _workers.Any(worker => worker.IsHashing))
                 {
                     activeMiningTime += elapsed;
                     var previous = _scheduler.Beneficiary;
@@ -103,11 +118,21 @@ internal sealed class EtcHashMiningSession(
                     foreach (var worker in _workers)
                     {
                         var workerHashes = worker.Hashes;
-                        var workerRate = (workerHashes - lastWorkerHashes[worker.DeviceIndex]) / deltaSeconds;
-                        NativeDiagnostics.TryGetGpuTelemetry(worker.DeviceIndex, out var telemetry);
+                        var workerRate = (workerHashes - lastWorkerHashes[worker.DeviceId]) / deltaSeconds;
+                        var health = worker.Health;
+                        GpuTelemetry? telemetry = null;
+                        if (worker.DeviceId.Backend == ComputeBackendKind.Cuda)
+                            NativeDiagnostics.TryGetGpuTelemetry(worker.DeviceIndex, out telemetry);
                         gpuStatuses.Add(new GpuMiningStatus(
-                            worker.DeviceIndex, worker.IsPreparing, workerRate, telemetry));
-                        lastWorkerHashes[worker.DeviceIndex] = workerHashes;
+                            worker.DeviceIndex,
+                            worker.IsPreparing,
+                            workerRate,
+                            telemetry,
+                            worker.DeviceId.ToString(),
+                            health.Phase,
+                            health.TotalRecoveries,
+                            health.LastError));
+                        lastWorkerHashes[worker.DeviceId] = workerHashes;
                     }
 
                     var measuredPower = gpuStatuses
@@ -146,7 +171,10 @@ internal sealed class EtcHashMiningSession(
                         invalid,
                         sessionEnergyWattHours / 1000,
                         averagePower,
-                        gpuStatuses);
+                        gpuStatuses,
+                        pauseController?.IsPaused == true,
+                        Interlocked.Read(ref _acceptedUser),
+                        Interlocked.Read(ref _acceptedDeveloper));
                     if (updateStatus is null)
                     {
                         log($"Hashrate {rate / 1_000_000:F2} MH/s | shares {accepted}/{rejected} | beneficiary {_scheduler.Beneficiary}");
@@ -166,18 +194,25 @@ internal sealed class EtcHashMiningSession(
                     await DeveloperFeeStateStore.SaveAsync(_scheduler.Snapshot(), sessionToken);
                     lastPersist = now;
                 }
+
+                if (stopAfterDuration is { } duration &&
+                    GetSoakElapsed(now, soakPausedBaseline) >= duration)
+                {
+                    log($"ETCHash soak duration completed: {stopAfterDuration} active test time.");
+                    break;
+                }
             }
         }
         catch (OperationCanceledException) when (
             !cancellationToken.IsCancellationRequested &&
-            (Volatile.Read(ref _qualificationCompleted) != 0 || stopAfterDuration is not null))
+            Volatile.Read(ref _qualificationCompleted) != 0)
         {
-            log(Volatile.Read(ref _qualificationCompleted) != 0
-                ? $"ETCHash qualification target reached: {stopAfterAcceptedShares} accepted share(s)."
-                : $"ETCHash soak duration completed: {stopAfterDuration}.");
+            log($"ETCHash qualification target reached: {stopAfterAcceptedShares} accepted share(s).");
         }
         finally
         {
+            if (pauseController is not null)
+                pauseController.StateChanged -= OnPauseStateChanged;
             _sessionLifetime = null;
             await DeveloperFeeStateStore.SaveAsync(_scheduler.Snapshot(), CancellationToken.None);
             foreach (var worker in _workers)
@@ -196,7 +231,7 @@ internal sealed class EtcHashMiningSession(
             else
                 _latestDeveloperWork = work;
 
-            if (work.Beneficiary != _scheduler.Beneficiary)
+            if (work.Beneficiary != _scheduler.Beneficiary || pauseController?.IsPaused == true)
                 return;
             foreach (var worker in _workers)
                 worker.Assign(work);
@@ -209,6 +244,11 @@ internal sealed class EtcHashMiningSession(
     {
         lock (_workGate)
         {
+            if (pauseController?.IsPaused == true)
+            {
+                PauseWorkers();
+                return;
+            }
             var work = beneficiary == MiningBeneficiary.User ? _latestUserWork : _latestDeveloperWork;
             if (work is null)
             {
@@ -221,6 +261,30 @@ internal sealed class EtcHashMiningSession(
                 worker.Assign(work);
         }
     }
+
+    private void OnPauseStateChanged(MiningPauseSnapshot state)
+    {
+        if (pauseController!.IsPaused)
+        {
+            lock (_workGate)
+                PauseWorkers();
+            log($"Mining manually paused; pool connections remain active (pause #{state.PauseCount}).");
+            return;
+        }
+
+        log($"Mining resumed after {state.TotalPausedDuration:c} total manual pause time.");
+        SelectCurrentWork(_scheduler.Beneficiary);
+    }
+
+    private void PauseWorkers()
+    {
+        foreach (var worker in _workers)
+            worker.Pause();
+    }
+
+    private TimeSpan GetSoakElapsed(TimeSpan wallClockElapsed, TimeSpan pausedDurationBaseline) =>
+        pauseController?.GetUnpausedElapsed(wallClockElapsed, pausedDurationBaseline) ??
+        wallClockElapsed;
 
     private void OnConnectionLost(EtcHashPoolClient pool)
     {
@@ -257,6 +321,10 @@ internal sealed class EtcHashMiningSession(
         if (accepted)
         {
             var count = Interlocked.Increment(ref _accepted);
+            if (work.Beneficiary == MiningBeneficiary.User)
+                Interlocked.Increment(ref _acceptedUser);
+            else
+                Interlocked.Increment(ref _acceptedDeveloper);
             log($"ETCHash share #{count} ACCEPTED [{work.Beneficiary}] nonce=0x{share.Nonce:x16}.");
             if (stopAfterAcceptedShares is > 0 && count >= stopAfterAcceptedShares)
             {

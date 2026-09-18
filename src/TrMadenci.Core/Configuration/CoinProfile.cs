@@ -21,7 +21,7 @@ public static class CoinProfileCatalog
                 "ETCHash correctness, performance and live-share qualification passed; soak qualification remains."),
             ["cfx"] = new(
                 "cfx", "Conflux", "CFX", "Conflux Core Space Mainnet", "octopus", false,
-                "The Octopus engine and Binance Pool protocol qualification are not complete yet.")
+                "Octopus GPU vector, performance and accepted live-share qualification remain incomplete.")
         };
 
     public static IReadOnlyCollection<CoinProfile> All => Profiles.Values.ToArray();

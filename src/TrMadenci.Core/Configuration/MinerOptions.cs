@@ -1,6 +1,14 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace TrMadenci.Core.Configuration;
+
+public enum ComputeBackendMode
+{
+    Auto,
+    Cuda,
+    OpenCl
+}
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record MinerOptions
@@ -9,7 +17,10 @@ public sealed record MinerOptions
     public string Algorithm { get; init; } = "kawpow";
     public PoolOptions Pool { get; init; } = new();
     public PoolOptions? FailoverPool { get; init; }
+    [JsonConverter(typeof(ComputeBackendModeConverter))]
+    public ComputeBackendMode ComputeBackend { get; init; } = ComputeBackendMode.Auto;
     public int[] GpuDevices { get; init; } = [];
+    public string[] ComputeDevices { get; init; } = [];
 
     public void Validate()
     {
@@ -22,7 +33,83 @@ public sealed record MinerOptions
         FailoverPool?.Validate(nameof(FailoverPool));
         if (GpuDevices.Distinct().Count() != GpuDevices.Length || GpuDevices.Any(index => index < 0))
             throw new ArgumentException("GPU device indexes must be unique and non-negative.");
+        if (ComputeDevices.Distinct(StringComparer.OrdinalIgnoreCase).Count() != ComputeDevices.Length)
+            throw new ArgumentException("Compute device identifiers must be unique.");
+        if (ComputeDevices.Length > 0 && GpuDevices.Length > 0)
+            throw new ArgumentException("Use either computeDevices or the legacy gpuDevices list, not both.");
+        if (ComputeBackend == ComputeBackendMode.Auto && ComputeDevices.Length > 0)
+            throw new ArgumentException("Explicit computeDevices require computeBackend 'cuda' or 'openCl'.");
+        if (ComputeBackend == ComputeBackendMode.OpenCl && GpuDevices.Length > 0)
+            throw new ArgumentException("OpenCL selection uses computeDevices identifiers such as 'opencl:0:0'.");
+        foreach (var device in ComputeDevices)
+        {
+            if (!TryParseComputeDevice(device, out var backend, out _, out _))
+                throw new ArgumentException($"Invalid compute device identifier '{device}'.");
+            if ((ComputeBackend == ComputeBackendMode.Cuda && backend != ComputeBackendMode.Cuda) ||
+                (ComputeBackend == ComputeBackendMode.OpenCl && backend != ComputeBackendMode.OpenCl))
+                throw new ArgumentException(
+                    $"Compute device '{device}' does not match backend '{ComputeBackend}'.");
+        }
     }
+
+    public int[] GetCudaDeviceIndexes() => ComputeBackend == ComputeBackendMode.OpenCl
+        ? []
+        : ComputeDevices.Length == 0
+            ? GpuDevices
+            : ComputeDevices.Select(device => int.Parse(device.AsSpan("cuda:".Length))).ToArray();
+
+    private static bool TryParseComputeDevice(
+        string value,
+        out ComputeBackendMode backend,
+        out int platformIndex,
+        out int deviceIndex)
+    {
+        backend = ComputeBackendMode.Auto;
+        platformIndex = 0;
+        deviceIndex = -1;
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+        var parts = value.Split(':', StringSplitOptions.TrimEntries);
+        if (parts.Length == 2 && string.Equals(parts[0], "cuda", StringComparison.OrdinalIgnoreCase))
+        {
+            backend = ComputeBackendMode.Cuda;
+            return int.TryParse(parts[1], out deviceIndex) && deviceIndex >= 0;
+        }
+        if (parts.Length == 3 && string.Equals(parts[0], "opencl", StringComparison.OrdinalIgnoreCase))
+        {
+            backend = ComputeBackendMode.OpenCl;
+            return int.TryParse(parts[1], out platformIndex) && platformIndex >= 0 &&
+                int.TryParse(parts[2], out deviceIndex) && deviceIndex >= 0;
+        }
+        return false;
+    }
+}
+
+public sealed class ComputeBackendModeConverter : JsonConverter<ComputeBackendMode>
+{
+    public override ComputeBackendMode Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.String ||
+            !Enum.TryParse<ComputeBackendMode>(reader.GetString(), true, out var value) ||
+            !Enum.IsDefined(value))
+            throw new JsonException("computeBackend must be one of: auto, cuda, openCl.");
+        return value;
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        ComputeBackendMode value,
+        JsonSerializerOptions options) =>
+        writer.WriteStringValue(value switch
+        {
+            ComputeBackendMode.Auto => "auto",
+            ComputeBackendMode.Cuda => "cuda",
+            ComputeBackendMode.OpenCl => "openCl",
+            _ => throw new JsonException($"Unknown compute backend '{value}'.")
+        });
 }
 
 public sealed record PoolOptions

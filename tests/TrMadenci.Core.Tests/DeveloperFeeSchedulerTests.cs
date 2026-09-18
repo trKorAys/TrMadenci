@@ -1,3 +1,4 @@
+using TrMadenci.Core.Configuration;
 using TrMadenci.Core.Fees;
 
 namespace TrMadenci.Core.Tests;
@@ -50,6 +51,27 @@ public sealed class DeveloperFeeSchedulerTests
         restored.Record(TimeSpan.FromSeconds(970));
 
         Assert.Equal(MiningBeneficiary.Developer, restored.Beneficiary);
+    }
+
+    [Fact]
+    public void Cryptographic_windows_always_stay_inside_product_policy_bounds()
+    {
+        var source = new CryptographicFeeWindowSource();
+        var observed = new HashSet<TimeSpan>();
+
+        for (var index = 0; index < 128; index++)
+        {
+            var window = source.Next(
+                ProductPolicy.MinimumDeveloperWindow,
+                ProductPolicy.MaximumDeveloperWindow);
+            Assert.InRange(
+                window,
+                ProductPolicy.MinimumDeveloperWindow,
+                ProductPolicy.MaximumDeveloperWindow);
+            observed.Add(window);
+        }
+
+        Assert.True(observed.Count > 1, "Cryptographic window selection unexpectedly produced one fixed duration.");
     }
 
     private static DeveloperFeeScheduler CreateScheduler(decimal rate, TimeSpan window) =>

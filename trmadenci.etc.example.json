@@ -7,6 +7,13 @@
     "username": "BINANCE_MINING_ACCOUNT.worker",
     "password": "x"
   },
-  "failoverPool": null,
+  "failoverPool": {
+    "host": "etc.poolbinance.com",
+    "port": 443,
+    "username": "BINANCE_MINING_ACCOUNT.worker",
+    "password": "x"
+  },
+  "computeBackend": "auto",
+  "computeDevices": [],
   "gpuDevices": [0]
 }

@@ -10,3 +10,6 @@ artifacts/
 trmadenci.local.json
 trmadenci.*.local.json
 trmadenci.json
+*.pfx
+*.p12
+secrets/

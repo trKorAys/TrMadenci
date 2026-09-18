@@ -7,7 +7,11 @@ internal sealed record GpuMiningStatus(
     int DeviceIndex,
     bool IsPreparing,
     double HashesPerSecond,
-    GpuTelemetry? Telemetry);
+    GpuTelemetry? Telemetry,
+    string? DeviceLabel = null,
+    ComputeWorkerPhase WorkerPhase = ComputeWorkerPhase.Paused,
+    long RecoveryCount = 0,
+    string? LastWorkerError = null);
 
 internal sealed record MiningStatusSnapshot(
     DateTimeOffset Timestamp,
@@ -27,4 +31,7 @@ internal sealed record MiningStatusSnapshot(
     long InvalidShares,
     double SessionEnergyKwh,
     double? AveragePowerWatts,
-    IReadOnlyList<GpuMiningStatus> Gpus);
+    IReadOnlyList<GpuMiningStatus> Gpus,
+    bool IsManuallyPaused = false,
+    long AcceptedUserShares = 0,
+    long AcceptedDeveloperShares = 0);

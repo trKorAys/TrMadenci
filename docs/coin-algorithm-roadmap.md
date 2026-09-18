@@ -1,6 +1,6 @@
 # Coin and algorithm roadmap
 
-Research snapshot: 2026-09-11
+Research snapshot: 2026-09-12
 
 ## Product boundary
 
@@ -19,14 +19,23 @@ submission, wallet validation, failover behavior, test vectors, and hardware tun
 
 | Priority | Algorithm / capability | Initial networks | Hardware | Decision |
 | --- | --- | --- | --- | --- |
-| P0 | KAWPOW | Ravencoin | NVIDIA GPU | End-to-end production candidate complete; finish soak, second-pool conformance and signed packaging gates. |
+| P0 | KAWPOW | Ravencoin | NVIDIA GPU | End-to-end single-GPU qualification accepted by the product owner; retain second-pool, multi-GPU and signed-package coverage as broader public-release gates. |
 | P1 | ETCHash | Ethereum Classic | GPU / specialized hardware | In progress: full CUDA DAG, official CPU/GPU vector, Binance job/epoch handling, session/reconnect, accepted live share and current-epoch split-kernel performance complete; next complete soak qualification. |
-| P2 | Octopus | Conflux | High-VRAM NVIDIA GPU | Epoch/cache/DAG sizing, Binance wire models, full CPU oracle, CUDA DAG-item validator and gated full-DAG lifecycle implemented. Keep gated pending nonce search and live-share qualification. |
-| P2 | Cross-vendor GPU backend | Existing algorithms | AMD and Intel GPU | Use OpenCL first for broad Windows coverage; keep CUDA as the optimized NVIDIA backend. |
+| P2 | Octopus | Conflux | High-VRAM NVIDIA GPU | Epoch/cache/DAG sizing, Binance client, full CPU oracle, CUDA DAG/worker and a CPU-verified qualification session implemented. Keep gated pending GPU vector execution, optimization and accepted live-share qualification. |
+| P2 | Cross-vendor GPU backend | Existing algorithms | AMD and Intel GPU | OpenCL ICD discovery, stable device IDs, strict configuration and tested CUDA-first/OpenCL-fallback resolution are complete, together with light-cache upload and a CPU-verified full ETCHash epoch/DAG lifecycle. The split nonce-search kernel, backend-neutral ETC worker and same-process vector-to-pool qualification gate are implemented but remain disabled until executed on a signed native build; CUDA stays the optimized NVIDIA backend. |
 | P3 | RandomX | Monero | CPU | Separate CPU engine. RandomX is explicitly optimized for general-purpose CPUs, not GPUs. |
 | Deferred | Equihash | Zcash | ASIC-dominated | Binance Pool and Spot are available, but a consumer-GPU implementation is not a competitive priority. |
 | Deferred | ETHash | EthereumPoW | GPU / specialized hardware | Binance Pool support alone is insufficient while there is no active Binance Spot market. |
 | Device support | SHA-256, Scrypt, kHeavyHash, Blake3 ASICs | BTC/BCH, LTC/DOGE, Kaspa, Alephium | ASIC | Add monitoring, configuration, proxy and Stratum support; do not spend time on noncompetitive GPU kernels. |
+
+As of the 2026-09-12 review, no remaining Binance Pool coin satisfies all three of the
+initial expansion constraints: active Binance Spot/deposit support, economically useful
+consumer-GPU mining, and a new algorithm. ETHW is GPU-mineable with Ethash and remains in
+Binance Pool, but Binance explicitly states that it is not listed and deposits are not
+supported. ZEC is pooled and traded, but current Zcash guidance says network difficulty
+requires ASIC hardware in practice. The next implementation milestone is therefore the
+OpenCL compute-backend boundary for AMD and Intel GPUs; ETHW and Equihash remain gated
+until the product requirements change.
 
 The first expansion phase requires both a qualified Binance Pool route and an active
 Binance Spot market. Market availability changes over time and must be checked at release
@@ -96,11 +105,13 @@ An algorithm is not listed as supported until all of these pass:
 
 - Ravencoin KAWPOW: https://ravencoin.org/about/
 - Binance Pool algorithms and endpoints: https://www.binance.com/en/support/faq/detail/32843190fc1c4329a4df024339efa8d8
+- Binance ETHW mining and exchange limitations: https://www.binance.com/de/support/faq/detail/a19bbb99a54a41cd9d49072d7fa7fd61
 - Ethereum Classic miner FAQ: https://www.ethereumclassic.org/faqs/miners/
 - Monero RandomX documentation: https://docs.getmonero.org/proof-of-work/random-x/
 - RandomX reference and license: https://github.com/tevador/RandomX
 - Evrmore algorithm differences: https://evrmorecoin.org/other/faq/
 - Conflux Octopus specification: https://github.com/Conflux-Chain/CIPs/blob/master/CIPs/cip-3.md
+- Zcash mining hardware guidance: https://zcash.readthedocs.io/en/master/rtd_pages/zcash_mining_guide.html
 - Kaspa mining status: https://wiki.kaspa.org/mining
 - Alephium ASIC policy: https://docs.alephium.org/frequently-asked-questions/
 - OpenCL specification registry: https://registry.khronos.org/OpenCL/

@@ -38,6 +38,7 @@ add_library(TrMadenci.Native SHARED
     src/gpu_telemetry.cpp
     src/nonce_search.cu
     src/octopus_reference.cpp
+    src/opencl_probe.cpp
     src/reference_bridge.cpp
 )
 

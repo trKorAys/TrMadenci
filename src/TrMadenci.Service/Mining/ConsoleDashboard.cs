@@ -8,16 +8,22 @@ internal sealed class ConsoleDashboard : IDisposable
     private const int MaximumRetainedEvents = 1_000;
     private readonly object _gate = new();
     private readonly List<string> _events = [];
-    private readonly MinerOptions _options;
-    private readonly CoinProfile _coin;
+    private readonly MinerOptions? _options;
+    private readonly CoinProfile? _coin;
+    private readonly MiningPauseController? _pauseController;
     private MiningStatusSnapshot? _status;
+    private bool _externallyPaused;
     private bool _stopped;
     private bool _disposed;
 
-    private ConsoleDashboard(MinerOptions options, CoinProfile coin)
+    private ConsoleDashboard(
+        MinerOptions? options,
+        CoinProfile? coin,
+        MiningPauseController? pauseController)
     {
         _options = options;
         _coin = coin;
+        _pauseController = pauseController;
         Console.OutputEncoding = Encoding.UTF8;
         try
         {
@@ -32,9 +38,17 @@ internal sealed class ConsoleDashboard : IDisposable
     }
 
     public static ConsoleDashboard? CreateIfSupported(
-        MinerOptions options, CoinProfile coin, bool enabled) =>
+        MinerOptions options,
+        CoinProfile coin,
+        MiningPauseController pauseController,
+        bool enabled) =>
         enabled && !Console.IsOutputRedirected && !Console.IsErrorRedirected
-            ? new ConsoleDashboard(options, coin)
+            ? new ConsoleDashboard(options, coin, pauseController)
+            : null;
+
+    public static ConsoleDashboard? CreateForSupervisor(bool enabled) =>
+        enabled && !Console.IsOutputRedirected && !Console.IsErrorRedirected
+            ? new ConsoleDashboard(null, null, null)
             : null;
 
     public void Log(string message)
@@ -53,6 +67,17 @@ internal sealed class ConsoleDashboard : IDisposable
         lock (_gate)
         {
             _status = status;
+            _externallyPaused = status.IsManuallyPaused;
+            Render();
+        }
+    }
+
+    public void UpdateControlState(MiningControlResponse response)
+    {
+        lock (_gate)
+        {
+            _externallyPaused = string.Equals(
+                response.State, "paused", StringComparison.OrdinalIgnoreCase);
             Render();
         }
     }
@@ -105,18 +130,26 @@ internal sealed class ConsoleDashboard : IDisposable
         var invalid = status?.InvalidShares ?? 0;
         var submitted = accepted + rejected;
         var acceptance = submitted > 0 ? accepted * 100d / submitted : 0;
-        var pool = status?.Pool ?? $"{_options.Pool.Host}:{_options.Pool.Port}";
+        var pool = status?.Pool ?? (_options is null
+            ? "durum bekleniyor"
+            : $"{_options.Pool.Host}:{_options.Pool.Port}");
         var beneficiary = status?.Beneficiary.ToString() ?? "User";
         var health = Health(status);
+        var coinName = status?.CoinName ?? _coin?.Name ?? "durum bekleniyor";
+        var coinTicker = status?.CoinTicker ?? _coin?.Ticker ?? "-";
+        var network = status?.Network ?? _coin?.Network ?? "-";
+        var algorithm = status?.Algorithm ?? _coin?.Algorithm.ToUpperInvariant() ?? "-";
 
         return
         [
-            "TrMadenci | KAWPOW Mining Dashboard",
-            $"Coin / Ağ  : {_coin.Name} ({_coin.Ticker}) | {_coin.Network} | Algoritma: {_coin.Algorithm.ToUpperInvariant()}",
+            "TrMadenci | Mining Dashboard",
+            "Kontrol: P=duraklat | S=baslat/devam | D=durum | Ctrl+C=durdur",
+            $"Coin / Ağ  : {coinName} ({coinTicker}) | {network} | Algoritma: {algorithm}",
             $"Havuz      : {pool} | Hedef: {beneficiary} | Sağlık: {health}",
-            $"Oturum     : {Duration(status?.SessionElapsed ?? TimeSpan.Zero)} | Aktif: {Duration(status?.ActiveMiningTime ?? TimeSpan.Zero)} | Anlık: {(status?.CurrentHashesPerSecond ?? 0) / 1_000_000:F2} MH/s",
+            $"Oturum     : {Duration(status?.SessionElapsed ?? TimeSpan.Zero)} | Aktif: {Duration(status?.ActiveMiningTime ?? TimeSpan.Zero)} | Anlık: {Hashrate(status?.CurrentHashesPerSecond ?? 0)}",
             $"Geçmiş     : {accepted} kabul / {rejected} ret / {invalid} invalid | Kabul: %{acceptance:F2} | Toplam hash: {Compact(status?.TotalHashes ?? 0)}",
-            $"Ortalama   : {(status?.AverageHashesPerSecond ?? 0) / 1_000_000:F2} MH/s | Enerji: {status?.SessionEnergyKwh ?? 0:F3} kWh | Ort. güç: {Power(status?.AveragePowerWatts)} | Günlük: {ProjectedEnergy(status)}",
+            $"Rota kabul : kullanıcı {status?.AcceptedUserShares ?? 0} | developer {status?.AcceptedDeveloperShares ?? 0}",
+            $"Ortalama   : {Hashrate(status?.AverageHashesPerSecond ?? 0)} | Enerji: {status?.SessionEnergyKwh ?? 0:F3} kWh | Ort. güç: {Power(status?.AveragePowerWatts)} | Günlük: {ProjectedEnergy(status)}",
             separator,
             "AKTİF İŞLEMLER / GEÇMİŞ OLAYLAR"
         ];
@@ -153,14 +186,25 @@ internal sealed class ConsoleDashboard : IDisposable
     {
         var temperature = gpu.Telemetry?.TemperatureC is { } temp ? $"{temp}C" : "n/a";
         var fan = gpu.Telemetry?.FanPercent is { } fanPercent ? $"fan {fanPercent}%" : "fan n/a";
-        var activity = gpu.IsPreparing ? "hazırlanıyor" : $"{gpu.HashesPerSecond / 1_000_000:F2} MH/s";
-        return $"GPU{gpu.DeviceIndex} {activity} {temperature} {fan}";
+        var activity = gpu.WorkerPhase switch
+        {
+            ComputeWorkerPhase.Preparing => "hazırlanıyor",
+            ComputeWorkerPhase.Recovering => $"kurtarılıyor({gpu.RecoveryCount})",
+            ComputeWorkerPhase.Faulted => "HATA",
+            ComputeWorkerPhase.Paused => "bekliyor",
+            ComputeWorkerPhase.Stopped => "durdu",
+            ComputeWorkerPhase.Submitting => "share gönderiyor",
+            _ => Hashrate(gpu.HashesPerSecond)
+        };
+        return $"{gpu.DeviceLabel ?? $"GPU{gpu.DeviceIndex}"} {activity} {temperature} {fan}";
     }
 
     private string Health(MiningStatusSnapshot? status)
     {
         if (_stopped)
             return "DURDU";
+        if (_pauseController?.IsPaused == true || _externallyPaused || status?.IsManuallyPaused == true)
+            return "MANUEL DURAKLATILDI";
         if (status is null)
             return "HAZIRLANIYOR";
         var temperatures = status.Gpus
@@ -171,6 +215,10 @@ internal sealed class ConsoleDashboard : IDisposable
             return "KRITIK SICAKLIK";
         if (temperatures.Any(temperature => temperature >= 78))
             return "SICAK";
+        if (status.Gpus.Any(gpu => gpu.WorkerPhase == ComputeWorkerPhase.Faulted))
+            return "GPU HATASI";
+        if (status.Gpus.Any(gpu => gpu.WorkerPhase == ComputeWorkerPhase.Recovering))
+            return "KURTARILIYOR";
         if (status.Gpus.Any(gpu => gpu.IsPreparing))
             return "HAZIRLANIYOR";
         return status.CurrentHashesPerSecond > 0 ? "SAGLIKLI" : "BEKLIYOR";
@@ -182,6 +230,14 @@ internal sealed class ConsoleDashboard : IDisposable
             : "n/a";
 
     private static string Power(double? watts) => watts is { } value ? $"{value:F1} W" : "n/a";
+
+    private static string Hashrate(double hashesPerSecond) => hashesPerSecond switch
+    {
+        >= 1_000_000_000 => $"{hashesPerSecond / 1_000_000_000:F2} GH/s",
+        >= 1_000_000 => $"{hashesPerSecond / 1_000_000:F2} MH/s",
+        >= 1_000 => $"{hashesPerSecond / 1_000:F2} KH/s",
+        _ => $"{hashesPerSecond:F2} H/s"
+    };
 
     private static string Duration(TimeSpan value) =>
         value.TotalDays >= 1
