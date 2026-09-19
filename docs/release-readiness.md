@@ -86,7 +86,7 @@ Snapshot: 2026-09-19
   and is ready for publisher signing. Its packaged native DLL matches the Release build
   at SHA-256 `7AAE54694AD5FBD2E2CD4A7F0A86E4C4D1C6FF7EE71CC9CDFC1F485DF293C05B`;
   the unsigned service apphost is
-  `DCB5EB61070C7E38969777146083D20612E6C2CC508059C59B4D869F28E68C2C`.
+  `2D0CE1B860363D44550D0CEE6499F1BD04849DC64FEAF66E21361BF19C054EFF`.
 - The Release solution build is warning-free and all 164 hardware-independent tests pass,
   including pause timing/idempotence, same-user named-pipe control, and paused Octopus
   fresh-job routing. Supervisor status-transport integration and the `P`/`S`/`D`/`R`

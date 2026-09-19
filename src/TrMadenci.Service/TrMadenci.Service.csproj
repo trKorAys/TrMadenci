@@ -11,6 +11,36 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="..\..\run-trmadenci.bat"
+             Link="run-trmadenci.bat"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\README.md"
+             Link="README.md"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\THIRD-PARTY-NOTICES.md"
+             Link="THIRD-PARTY-NOTICES.md"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\trmadenci.example.json"
+             Link="trmadenci.example.json"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\trmadenci.etc.example.json"
+             Link="trmadenci.etc.example.json"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\trmadenci.cfx.example.json"
+             Link="trmadenci.cfx.example.json"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\trmadenci.xmr.example.json"
+             Link="trmadenci.xmr.example.json"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\docs\architecture.md"
+             Link="docs\architecture.md"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\docs\coin-algorithm-roadmap.md"
+             Link="docs\coin-algorithm-roadmap.md"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\docs\release-readiness.md"
+             Link="docs\release-readiness.md"
+             CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\scripts\Get-TrMadenciSupervisorReport.ps1"
              Link="tools\Get-TrMadenciSupervisorReport.ps1"
              CopyToPublishDirectory="PreserveNewest" />

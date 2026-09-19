@@ -6,6 +6,12 @@ cd /d "%~dp0"
 
 set "PROJECT=src\TrMadenci.Service\TrMadenci.Service.csproj"
 set "SOLUTION=TrMadenci.sln"
+set "APP=%~dp0TrMadenci.Service.exe"
+if exist "%APP%" (
+    set "RUNTIME_MODE=PACKAGE"
+) else (
+    set "RUNTIME_MODE=SOURCE"
+)
 set "CONFIG="
 set "COIN_NAME="
 set "ACTION_TITLE="
@@ -25,7 +31,11 @@ echo   2 - Ethereum Classic ETC / ETCHASH   [SOAK GEREKLI]
 echo   3 - Conflux           CFX / OCTOPUS   [YETERLILIK GEREKLI]
 echo   4 - Monero            XMR / RANDOMX   [GELISTIRME]
 echo.
-echo   5 - Derleme islemleri
+if /I "%RUNTIME_MODE%"=="SOURCE" (
+    echo   5 - Derleme islemleri
+) else (
+    echo   5 - Hakkinda ve destek
+)
 echo   6 - Cikis
 echo.
 echo ================================================
@@ -37,7 +47,10 @@ if "%CHOICE%"=="1" goto SELECT_RVN
 if "%CHOICE%"=="2" goto SELECT_ETC
 if "%CHOICE%"=="3" goto SELECT_CFX
 if "%CHOICE%"=="4" goto SELECT_XMR
-if "%CHOICE%"=="5" goto BUILD_MENU
+if "%CHOICE%"=="5" (
+    if /I "%RUNTIME_MODE%"=="SOURCE" goto BUILD_MENU
+    goto ABOUT
+)
 if "%CHOICE%"=="6" goto END
 goto COIN_MENU
 
@@ -267,6 +280,29 @@ if "%CHOICE%"=="3" goto COIN_MENU
 if "%CHOICE%"=="4" goto END
 goto BUILD_MENU
 
+:ABOUT
+cls
+echo ================================================
+echo              TrMadenci Hakkinda
+echo ================================================
+echo.
+echo   Destek : koray.altiner@outlook.com
+echo   Web    : https://www.yatirimiq.com
+echo.
+echo   Gelistirici ucreti: %%0,75
+echo   Ucret, secilen coin ve algoritma uzerinde
+echo   seffaf ve rastgele zaman araliklariyla uygulanir.
+echo.
+echo   1 - Coin secimine don
+echo   2 - Cikis
+echo.
+set "CHOICE="
+set /p "CHOICE=Seciminiz: "
+if not defined CHOICE goto END
+if "%CHOICE%"=="1" goto COIN_MENU
+if "%CHOICE%"=="2" goto END
+goto ABOUT
+
 :EXECUTE
 cls
 echo ================================================
@@ -281,10 +317,18 @@ echo   D: durum, CTRL+C: guvenli kapatma.
 echo ================================================
 echo.
 
+if /I "%RUNTIME_MODE%"=="PACKAGE" goto EXECUTE_PACKAGE
+
 dotnet run ^
   --project "%PROJECT%" ^
   -c Release ^
   -- "%CONFIG%" %ACTION_ARGS%
+goto EXECUTE_DONE
+
+:EXECUTE_PACKAGE
+"%APP%" "%CONFIG%" %ACTION_ARGS%
+
+:EXECUTE_DONE
 
 set "RESULT=%ERRORLEVEL%"
 echo.
