@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #if defined(_WIN32)
@@ -78,6 +79,7 @@ struct trmadenci_etchash_epoch_info
 
 struct trmadenci_cuda_epoch;
 struct trmadenci_opencl_etchash_epoch;
+struct trmadenci_randomx_context;
 
 struct trmadenci_cuda_epoch_build_info
 {
@@ -104,6 +106,16 @@ struct trmadenci_search_result
     uint8_t final_hash[32];
     uint64_t hashes_searched;
     double search_milliseconds;
+};
+
+struct trmadenci_randomx_build_info
+{
+    uint32_t vm_count;
+    uint32_t init_threads;
+    uint32_t recommended_flags;
+    int32_t huge_pages_active;
+    uint64_t dataset_bytes;
+    double build_milliseconds;
 };
 
 TRMADENCI_API int32_t trmadenci_get_device_count();
@@ -167,6 +179,30 @@ TRMADENCI_API int32_t trmadenci_octopus_hash_reference(
     uint64_t compressed_multi_point,
     const uint32_t points[32],
     uint8_t final_hash[32]);
+TRMADENCI_API uint32_t trmadenci_randomx_recommended_flags();
+TRMADENCI_API int32_t trmadenci_randomx_hash_light(
+    const uint8_t* key,
+    size_t key_size,
+    const uint8_t* input,
+    size_t input_size,
+    uint8_t output[32]);
+TRMADENCI_API int32_t trmadenci_create_randomx_context(
+    const uint8_t* key,
+    size_t key_size,
+    uint32_t vm_count,
+    uint32_t init_threads,
+    int32_t use_huge_pages,
+    int32_t secure_jit,
+    struct trmadenci_randomx_context** context,
+    struct trmadenci_randomx_build_info* build_info);
+TRMADENCI_API void trmadenci_destroy_randomx_context(
+    struct trmadenci_randomx_context* context);
+TRMADENCI_API int32_t trmadenci_randomx_calculate_hash(
+    struct trmadenci_randomx_context* context,
+    uint32_t vm_index,
+    const uint8_t* input,
+    size_t input_size,
+    uint8_t output[32]);
 TRMADENCI_API int32_t trmadenci_validate_cuda_dag_items(
     int32_t block_number,
     uint32_t item_count,

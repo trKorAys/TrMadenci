@@ -1,0 +1,16 @@
+{
+  "coin": "xmr",
+  "algorithm": "randomx",
+  "pool": {
+    "host": "YOUR_MONERO_POOL_HOST",
+    "port": 3333,
+    "username": "YOUR_XMR_WALLET.worker",
+    "password": "x"
+  },
+  "computeBackend": "cpu",
+  "computeDevices": [],
+  "gpuDevices": [],
+  "cpuThreads": 0,
+  "cpuHugePages": true,
+  "cpuSecureJit": true
+}

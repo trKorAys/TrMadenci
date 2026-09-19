@@ -7,8 +7,9 @@ The managed control plane is split from the native hashing engine:
 2. `TrMadenci.Protocols` owns Stratum V1 transport and message handling.
 3. `TrMadenci.Core` owns pool selection, mining state, and fee accounting.
 4. `TrMadenci.NativeBridge` exposes a narrow managed engine contract.
-5. The C++20/CUDA library owns device discovery, DAG/cache and KAWPOW nonce search;
-   the managed worker performs a CPU-reference verification before submitting a share.
+5. The C++20/CUDA library owns GPU discovery, DAG/cache and GPU nonce search, and embeds
+   the RandomX CPU library behind the same narrow ABI; managed workers verify candidate
+   shares before submission.
 
 Fee state must be persisted periodically and on graceful shutdown. Switching is
 performed only between user and developer destinations for the same algorithm/coin,
@@ -16,15 +17,15 @@ so it never requires a DAG rebuild. Every transition must be emitted to logs and
 Only verified active hashing time accrues fee debt; connection, DAG creation, warm-up,
 reconnect, and stopped time do not. Accepted/rejected work statistics are also reported
 so the realized fee can be audited instead of inferred from wall-clock time.
-The official binary compiles the 0.75% policy and a Binance Pool developer destination
-for each qualified coin into `ProductPolicy`; JSON configuration cannot disable, reduce,
-or redirect it. A user pool may be any compatible pool. Fee work remains on the same
-coin and algorithm while only its destination changes to the embedded Binance Pool
-account. All qualified coin routes share the embedded `KorayAltiner.Milena` worker
-identity, while host and port remain coin-specific. The startup output and every
-beneficiary transition disclose the policy and destination. As with any source-available
-program, someone compiling modified source can alter constants; immutability applies to
-the signed official binary and its configuration surface.
+The official binary compiles the 0.75% policy and a same-coin developer destination for
+each qualified coin into `ProductPolicy`; JSON configuration cannot disable, reduce, or
+redirect it. A user pool may be any compatible pool. Existing qualified GPU routes use
+the embedded Binance Pool `KorayAltiner.Milena` worker. Monero cannot reuse that account:
+its profile remains disabled until a real XMR payout wallet is compiled into the official
+binary. The startup output and every beneficiary transition disclose the policy and
+destination. As with any source-available program, someone compiling modified source can
+alter constants; immutability applies to the signed official binary and its configuration
+surface.
 
 Before importing any hashing implementation, its license and complete dependency
 license chain must be documented.
@@ -32,7 +33,8 @@ license chain must be documented.
 The CPU correctness oracle is RavenCommunity `cpp-kawpow` revision
 `061d341011ca341e1f506c52b571f5fd64a0df71`, licensed under Apache-2.0. The GPLv3
 `kawpowminer` CUDA implementation is not incorporated. Our CUDA path is developed
-separately and checked bit-for-bit against the reference oracle.
+separately and checked bit-for-bit against the reference oracle. RandomX v1.2.3 revision
+`12f2c2ffe2108d6cf54c391fee33c8bc3646cdab` is vendored under its BSD-3-Clause license.
 
 The CUDA path uploads the reference light cache, generates DAG nodes in bounded batches
 to avoid Windows WDDM timeouts, and retains the full dataset and reusable search buffers
@@ -49,8 +51,23 @@ separate contracts so CUDA-specific KAWPOW assumptions do not leak into every co
 `CoinProfileCatalog` is the first implemented boundary: it binds coin, network and
 algorithm identity and refuses mining until the corresponding engine and protocol have
 qualified. `ProductPolicy` separately requires a same-coin, same-algorithm embedded
-developer destination. Ravencoin is enabled; Ethereum Classic and Conflux are registered
-but gated until their ETCHash and Octopus implementations are complete.
+developer destination. Ravencoin is enabled; Ethereum Classic, Conflux and Monero are
+registered but gated until their ETCHash, Octopus and RandomX implementations complete
+their respective qualification paths.
+
+RandomX is a distinct CPU boundary rather than another GPU kernel. Configuration requires
+`computeBackend=cpu`, rejects CUDA/OpenCL device identifiers, and records thread-count,
+huge-page and secure-JIT intent. The native bridge exposes recommended CPU features, a
+portable 256 MiB light-mode correctness oracle, and a persistent approximately 2,080 MiB
+full-memory dataset with per-worker VMs and large-page fallback. Its official v1 vector
+passes without a pool connection. The protocol layer parses Monero RandomX jobs and
+encodes JSON-RPC login/submission messages; its fail-closed client is covered by loopback
+login, notification, accepted-share and rejected-authorization tests. Production mining
+remains unavailable until the CPU nonce worker/session, seed replacement, bounded
+cancellation, CPU telemetry, same-coin fee routing and live evidence are implemented. A
+RandomX GPU path is deliberately not part of this boundary because
+the algorithm is designed around general-purpose CPU execution and upstream documents
+GPU implementations as disadvantaged.
 
 The configured user worker and the embedded developer worker are separate identities,
 even when their text happens to be equal in a developer's local configuration. A missing
@@ -115,6 +132,11 @@ The Octopus pre-production control plane is covered without mining hardware: tes
 subscription authentication, failover, beneficiary-specific cached-job routing, stale
 batch replacement, randomized fee-window bounds, full CPU share verification and local
 boundary rejection. These tests never allocate a DAG or submit to a public pool.
+The shared duration runner now accepts Octopus after its one-shot GPU and live-share
+qualifications. It excludes manual pause time, emits the same ten-second status evidence,
+and produces coin-neutral power, energy, VRAM and worker-health summaries. A standalone
+CFX verifier applies the fixed 24-hour production thresholds without loading a mining
+configuration or opening a pool.
 
 The cross-vendor path begins with a native OpenCL ICD discovery boundary that is loaded
 dynamically from Windows rather than linked to a vendor SDK. It enumerates GPU platform,
@@ -150,6 +172,13 @@ CUDA first, avoids duplicate NVIDIA selection through OpenCL when CUDA is presen
 falls back to OpenCL only when CUDA is empty and no legacy CUDA ordinal was explicitly
 requested. Explicit selections retain their configured order and every identifier must
 exist in the selected runtime.
+The standalone `--select-gpus` workflow uses that same backend boundary without opening
+a pool or acquiring a mining lease. It enumerates CUDA first in auto mode, lists stable
+device identifiers and memory, then atomically replaces only the three GPU-selection
+fields in the chosen JSON configuration. Cancellation leaves the file byte-for-byte
+unchanged. Once saved, Supervisor and unattended starts consume the explicit selection
+without interactive prompts; OpenCL selection does not bypass its mining qualification
+gate.
 The first OpenCL pool path is an explicit one-shot qualification, not a production
 selection. It requires `--mine`, the ETC profile, `computeBackend=openCl`, and the official
 OpenCL nonce self-test in the same process. Every selected device is recorded in an
@@ -243,7 +272,8 @@ Configuration, wallet, key and certificate files are excluded by construction. T
 carries its own inclusion/skip manifest and is created through a validated private
 temporary directory.
 
-Soak orchestration is algorithm-neutral for the qualified KAWPOW and ETCHASH sessions.
+Soak orchestration is algorithm-neutral for the qualified KAWPOW, ETCHASH and Octopus
+sessions.
 One parsed duration drives the session lifetime and a shared recorder; the legacy ETC
 option remains an alias, while unsupported algorithms and simultaneous qualification
 modes fail before pool access. Every ten seconds the append-only evidence records the full

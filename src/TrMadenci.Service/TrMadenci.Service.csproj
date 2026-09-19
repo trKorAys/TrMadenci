@@ -17,6 +17,12 @@
     <Content Include="..\..\scripts\New-TrMadenciSupportBundle.ps1"
              Link="tools\New-TrMadenciSupportBundle.ps1"
              CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\cpp-kawpow\LICENSE"
+             Link="licenses\cpp-kawpow-LICENSE.txt"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\RandomX\LICENSE"
+             Link="licenses\RandomX-LICENSE.txt"
+             CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <PropertyGroup>

@@ -7,7 +7,8 @@ public enum ComputeBackendMode
 {
     Auto,
     Cuda,
-    OpenCl
+    OpenCl,
+    Cpu
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -21,6 +22,9 @@ public sealed record MinerOptions
     public ComputeBackendMode ComputeBackend { get; init; } = ComputeBackendMode.Auto;
     public int[] GpuDevices { get; init; } = [];
     public string[] ComputeDevices { get; init; } = [];
+    public int CpuThreads { get; init; }
+    public bool CpuHugePages { get; init; } = true;
+    public bool CpuSecureJit { get; init; } = true;
 
     public void Validate()
     {
@@ -31,6 +35,13 @@ public sealed record MinerOptions
 
         Pool.Validate(nameof(Pool));
         FailoverPool?.Validate(nameof(FailoverPool));
+        var isRandomX = string.Equals(profile.Algorithm, "randomx", StringComparison.OrdinalIgnoreCase);
+        if (isRandomX && ComputeBackend != ComputeBackendMode.Cpu)
+            throw new ArgumentException("RandomX profiles require computeBackend 'cpu'.");
+        if (!isRandomX && ComputeBackend == ComputeBackendMode.Cpu)
+            throw new ArgumentException("computeBackend 'cpu' is currently reserved for RandomX profiles.");
+        if (CpuThreads is < 0 or > 1024)
+            throw new ArgumentOutOfRangeException(nameof(CpuThreads), "cpuThreads must be between 0 and 1024.");
         if (GpuDevices.Distinct().Count() != GpuDevices.Length || GpuDevices.Any(index => index < 0))
             throw new ArgumentException("GPU device indexes must be unique and non-negative.");
         if (ComputeDevices.Distinct(StringComparer.OrdinalIgnoreCase).Count() != ComputeDevices.Length)
@@ -41,6 +52,9 @@ public sealed record MinerOptions
             throw new ArgumentException("Explicit computeDevices require computeBackend 'cuda' or 'openCl'.");
         if (ComputeBackend == ComputeBackendMode.OpenCl && GpuDevices.Length > 0)
             throw new ArgumentException("OpenCL selection uses computeDevices identifiers such as 'opencl:0:0'.");
+        if (ComputeBackend == ComputeBackendMode.Cpu &&
+            (ComputeDevices.Length > 0 || GpuDevices.Length > 0))
+            throw new ArgumentException("CPU mining does not accept GPU or compute-device selections.");
         foreach (var device in ComputeDevices)
         {
             if (!TryParseComputeDevice(device, out var backend, out _, out _))
@@ -52,7 +66,7 @@ public sealed record MinerOptions
         }
     }
 
-    public int[] GetCudaDeviceIndexes() => ComputeBackend == ComputeBackendMode.OpenCl
+    public int[] GetCudaDeviceIndexes() => ComputeBackend is ComputeBackendMode.OpenCl or ComputeBackendMode.Cpu
         ? []
         : ComputeDevices.Length == 0
             ? GpuDevices
@@ -95,7 +109,7 @@ public sealed class ComputeBackendModeConverter : JsonConverter<ComputeBackendMo
         if (reader.TokenType != JsonTokenType.String ||
             !Enum.TryParse<ComputeBackendMode>(reader.GetString(), true, out var value) ||
             !Enum.IsDefined(value))
-            throw new JsonException("computeBackend must be one of: auto, cuda, openCl.");
+            throw new JsonException("computeBackend must be one of: auto, cuda, openCl, cpu.");
         return value;
     }
 
@@ -108,6 +122,7 @@ public sealed class ComputeBackendModeConverter : JsonConverter<ComputeBackendMo
             ComputeBackendMode.Auto => "auto",
             ComputeBackendMode.Cuda => "cuda",
             ComputeBackendMode.OpenCl => "openCl",
+            ComputeBackendMode.Cpu => "cpu",
             _ => throw new JsonException($"Unknown compute backend '{value}'.")
         });
 }

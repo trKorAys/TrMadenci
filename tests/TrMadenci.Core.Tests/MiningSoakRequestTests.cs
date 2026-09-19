@@ -27,6 +27,15 @@ public sealed class MiningSoakRequestTests
             request.Validate(mine: true, algorithm: "kawpow", qualificationRequested: false));
     }
 
+    [Fact]
+    public void General_soak_duration_supports_octopus_profiles()
+    {
+        var request = MiningSoakRequest.Parse(["trmadenci.cfx.local.json", "--soak-hours=24", "--mine"]);
+
+        Assert.NotNull(request);
+        request.Validate(mine: true, algorithm: "octopus", qualificationRequested: false);
+    }
+
     [Theory]
     [InlineData("--soak-hours")]
     [InlineData("--soak-hours=0")]
@@ -47,7 +56,7 @@ public sealed class MiningSoakRequestTests
 
     [Theory]
     [InlineData(false, "kawpow", false)]
-    [InlineData(true, "octopus", false)]
+    [InlineData(true, "randomx", false)]
     [InlineData(true, "etchash", true)]
     public void Unsupported_soak_context_is_rejected(
         bool mine,

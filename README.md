@@ -1,8 +1,8 @@
 # TrMadenci
 
-TrMadenci is a transparent multi-algorithm GPU miner for Windows. The current production
-candidate supports Ravencoin/KAWPOW, with ETCHash and Octopus kept behind explicit
-qualification gates, Stratum V1 failover, multiple GPUs, and CUDA/OpenCL backends.
+TrMadenci is a transparent multi-algorithm GPU/CPU miner for Windows. The current
+production candidate supports Ravencoin/KAWPOW, with ETCHash and Octopus behind explicit
+GPU qualification gates and Monero/RandomX behind a CPU-engine gate.
 
 ## Current status
 
@@ -26,10 +26,13 @@ qualification gates, Stratum V1 failover, multiple GPUs, and CUDA/OpenCL backend
   stale-work and CPU share-verification coverage
 - Dynamic OpenCL GPU discovery plus CPU-oracle-verified ETCHash sample DAG generation
   for the future AMD/Intel backend
+- Gated Monero profile, explicit CPU-only configuration, vendored RandomX v1.2.3
+  reference library, an official light-mode hash-vector diagnostic, persistent full-memory
+  dataset/VM lifecycle, and tested Monero JSON-RPC pool codecs/client
 
 The Binance-first multi-coin expansion order and its support criteria are documented in
-[`docs/coin-algorithm-roadmap.md`](docs/coin-algorithm-roadmap.md). New algorithms do
-not begin until the production KAWPOW search/share pipeline meets those criteria.
+[`docs/coin-algorithm-roadmap.md`](docs/coin-algorithm-roadmap.md). A profile remains
+disabled until its own engine, pool, fee destination and operational gates pass.
 
 The cross-vendor backend now has a dynamically loaded OpenCL discovery layer. The probe
 only reports installed GPU platforms and devices; it does not compile a kernel or mine:
@@ -71,6 +74,26 @@ dotnet run --project src/TrMadenci.Service -c Release -- trmadenci.etc.local.jso
 ```
 
 This path remains diagnostic-only and is not selected by normal ETC mining.
+
+The gated Monero profile uses `computeBackend: "cpu"`; GPU identifiers are rejected.
+`cpuThreads: 0` means automatic thread selection, while `cpuHugePages` and
+`cpuSecureJit` record the intended production policy. The first native diagnostic uses
+RandomX light mode and the upstream official vector. It allocates about 256 MiB, does
+not connect to a pool and does not start mining:
+
+```powershell
+dotnet run --project src/TrMadenci.Service -c Release -- `
+  trmadenci.xmr.example.json --randomx-self-test
+```
+
+The public template deliberately contains pool and wallet placeholders. Normal XMR
+`--mine` remains blocked until the nonce worker/session, seed rollover, bounded
+cancellation, CPU telemetry, failover/share qualification, developer XMR wallet and live
+qualification are complete. The full-memory API is compiled but has deliberately not
+allocated its approximately 2,080 MiB dataset while the current RVN run is active.
+RandomX can be implemented on GPUs, but its random program execution and
+memory/cache design intentionally favor CPUs; TrMadenci therefore does not advertise a
+RandomX GPU backend.
 
 After the native binaries are signed, OpenCL pool qualification is deliberately tied to
 the nonce test in the same process. Configure `computeBackend` as `openCl`, optionally
@@ -129,14 +152,19 @@ dotnet run --project src/TrMadenci.Service -c Release -- trmadenci.cfx.local.jso
 ```
 
 Do not run qualification before `--octopus-nonce-self-test` passes on the target GPU.
+The public template `trmadenci.cfx.example.json` uses Binance Pool port 443 with port 1800
+as failover and contains no local worker identity. Copy it to
+`trmadenci.cfx.local.json`, then enter the user's explicit mining account before any live
+qualification.
 
 The official public build's 0.75% developer fee and per-coin Binance Pool destinations
 are compiled into the binary and visible in startup output and logs. The user may mine
 to any compatible pool; fee windows use Binance Pool for the same selected coin and
 algorithm. They never switch the GPU to RVN or another unrelated network. Unknown JSON
 fields are rejected, so configuration cannot disable, reduce, or redirect the fee.
-Every registered coin uses the embedded `KorayAltiner.Milena` developer worker at that
-coin's own Binance Pool endpoint.
+Every currently configured GPU coin uses the embedded `KorayAltiner.Milena` developer
+worker at that coin's own Binance Pool endpoint. XMR remains disabled because Monero
+pools require an XMR payout wallet rather than that Binance mining-account worker.
 The user worker is always read explicitly from the selected configuration and printed at
 startup. TrMadenci never falls back from a missing or rejected user identity to the
 developer identity; all configured endpoints must reject authorization before startup
@@ -184,6 +212,14 @@ Start mining with:
 dotnet run --project src/TrMadenci.Service -- trmadenci.json --mine
 ```
 
+Windows users can instead start `run-trmadenci.bat`. The launcher first asks for the
+coin, shows its algorithm and readiness state, then presents only the actions currently
+allowed for that profile. RVN offers normal or supervised mining; ETC exposes its final
+soak and single-share qualification; CFX exposes its qualification tools; XMR remains
+diagnostic-only until its CPU worker and developer-wallet route are complete. Local ETC,
+CFX and future XMR settings use the ignored `trmadenci.<coin>.local.json` files, so the
+launcher never starts mining with a public template's placeholder identity.
+
 An interactive terminal uses a three-region dashboard: fixed coin/network and session
 analytics at the top, recent mining events in the middle, and live total power plus GPU
 health on the bottom row. Redirected output automatically stays in line-oriented log
@@ -201,9 +237,9 @@ The same controls work without focusing the mining window. Run exactly one stand
 command from a second terminal; no configuration path is required:
 
 ```powershell
-.\artifacts\TrMadenci-0.1.0-rc14-win-x64\TrMadenci.Service.exe --pause
-.\artifacts\TrMadenci-0.1.0-rc14-win-x64\TrMadenci.Service.exe --mining-status
-.\artifacts\TrMadenci-0.1.0-rc14-win-x64\TrMadenci.Service.exe --resume
+.\artifacts\TrMadenci-0.1.0-rc17-win-x64\TrMadenci.Service.exe --pause
+.\artifacts\TrMadenci-0.1.0-rc17-win-x64\TrMadenci.Service.exe --mining-status
+.\artifacts\TrMadenci-0.1.0-rc17-win-x64\TrMadenci.Service.exe --resume
 ```
 
 Every CUDA/OpenCL worker has a bounded recovery policy. A transient compute failure
@@ -223,7 +259,7 @@ allows three restarts in a rolling 15-minute window with 5/15/30-second backoff,
 that budget after a stable 10-minute run, and exits with code 4 if the circuit opens:
 
 ```powershell
-.\artifacts\TrMadenci-0.1.0-rc14-win-x64\TrMadenci.Service.exe `
+.\artifacts\TrMadenci-0.1.0-rc17-win-x64\TrMadenci.Service.exe `
   .\trmadenci.json --mine --supervise
 ```
 
@@ -273,6 +309,21 @@ targets NVIDIA compute capabilities 7.5, 8.6, 8.9 and 12.0 (RTX 20/30/40/50 fami
 CUDA 13.1 is required to build the native component; published packages include the
 NVRTC runtime files needed by the per-job program compiler. An NVIDIA display driver
 with support for the packaged CUDA runtime is still required on the mining machine.
+
+Run the standalone GPU selection wizard to enumerate the configured backend and save a
+single GPU, a subset, or every detected GPU. It does not connect to a pool or start
+mining. The write is atomic, preserves the remaining pool/coin fields, and records stable
+backend-qualified identifiers. Supervisor and unattended mining never prompt; they use
+the saved selection:
+
+```powershell
+.\artifacts\TrMadenci-0.1.0-rc17-win-x64\TrMadenci.Service.exe `
+  .\trmadenci.json --select-gpus
+```
+
+Choose comma-separated menu numbers, `A` for all, `Enter` to retain the current valid
+selection, or `Q` to cancel without changing the file. OpenCL GPUs may be selected for
+future qualification, but normal OpenCL pool mining remains gated.
 
 `computeBackend` accepts `auto`, `cuda`, or `openCl`. `auto` preserves the current
 production behavior and prefers CUDA. Existing numeric `gpuDevices` selections remain
@@ -346,29 +397,30 @@ after the first pool-accepted share. It does not enable ETC for ordinary `--mine
 dotnet run --project src/TrMadenci.Service -c Release -- trmadenci.etc.local.json --mine --etchash-qualification
 ```
 
-The duration-controlled `--soak-hours` mode supports KAWPOW and ETCHASH, records every
-ten-second status snapshot and mining event under `artifacts/soak`, then writes a final
-JSON health summary with share totals, energy, peak temperature, peak aggregate power,
-and maximum recovery count. The value uses an invariant decimal point and is limited to
-seven days. Manual pause time is excluded from the requested duration and is recorded
-separately in the final summary; wall-clock duration therefore grows while paused.
-Supervisor treats the clean duration exit as final and does not restart it:
+The duration-controlled `--soak-hours` mode supports KAWPOW, ETCHASH and OCTOPUS,
+records every ten-second status snapshot and mining event under `artifacts/soak`, then
+writes a final JSON health summary with share totals, energy, peak temperature, peak
+aggregate power, and maximum recovery count. The value uses an invariant decimal point
+and is limited to seven days. Manual pause time is excluded from the requested duration
+and is recorded separately in the final summary; wall-clock duration therefore grows
+while paused. Supervisor treats the clean duration exit as final and does not restart it:
 
 ```powershell
-.\artifacts\TrMadenci-0.1.0-rc14-win-x64\TrMadenci.Service.exe `
+.\artifacts\TrMadenci-0.1.0-rc17-win-x64\TrMadenci.Service.exe `
   .\trmadenci.json --mine --supervise --soak-hours=24
 ```
 
-Use the same option with `trmadenci.etc.local.json` for the pending ETC soak. The previous
+Use the same option with `trmadenci.etc.local.json` for the pending ETC soak. Octopus uses
+the same pause-aware recorder after its nonce vector and accepted-share qualifications
+pass. The previous
 `--etchash-soak-hours` spelling remains compatible for ETC configurations. Soak cannot be
-combined with one-shot qualification modes, and CFX remains excluded until its GPU and
-accepted-share qualification gates pass.
+combined with one-shot qualification modes.
 
 After an ETC soak completes, validate its recorded summary without loading a mining
 configuration or connecting to a pool:
 
 ```powershell
-.\artifacts\TrMadenci-0.1.0-rc14-win-x64\TrMadenci.Service.exe `
+.\artifacts\TrMadenci-0.1.0-rc17-win-x64\TrMadenci.Service.exe `
   --verify-etc-soak=.\artifacts\soak\etc-soak-YYYYMMDD-HHMMSS.summary.json
 ```
 
@@ -377,6 +429,12 @@ The fixed production gate requires a completed ETC/ETCHASH run requested for at 
 user-beneficiary accepted share, zero locally invalid shares, at most 5% rejected shares,
 positive power/energy/VRAM observations, a peak below the 85 C critical threshold, and no
 GPU ending in `Faulted` or `Recovering`. Manual pause remains allowed and extends wall time.
+CFX applies the same immutable evidence rules after its preceding GPU/live-share gates:
+
+```powershell
+.\artifacts\TrMadenci-0.1.0-rc17-win-x64\TrMadenci.Service.exe `
+  --verify-cfx-soak=.\artifacts\soak\cfx-soak-YYYYMMDD-HHMMSS.summary.json
+```
 
 Native build and reference-vector test:
 
@@ -399,7 +457,7 @@ certificate's 40-character thumbprint:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Sign-TrMadenci.ps1 `
-  -PackagePath .\artifacts\TrMadenci-0.1.0-rc14-win-x64 `
+  -PackagePath .\artifacts\TrMadenci-0.1.0-rc17-win-x64 `
   -CertificateThumbprint YOUR_CERTIFICATE_THUMBPRINT
 ```
 
@@ -409,7 +467,7 @@ It verifies each result immediately. Verify an existing package without modifyin
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-TrMadenciSignatures.ps1 `
-  -PackagePath .\artifacts\TrMadenci-0.1.0-rc14-win-x64 `
+  -PackagePath .\artifacts\TrMadenci-0.1.0-rc17-win-x64 `
   -ExpectedThumbprint YOUR_CERTIFICATE_THUMBPRINT
 ```
 
@@ -420,10 +478,10 @@ package inventory:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\New-TrMadenciReleaseManifest.ps1 `
-  -PackagePath .\artifacts\TrMadenci-0.1.0-rc14-win-x64
+  -PackagePath .\artifacts\TrMadenci-0.1.0-rc17-win-x64
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-TrMadenciReleaseManifest.ps1 `
-  -PackagePath .\artifacts\TrMadenci-0.1.0-rc14-win-x64
+  -PackagePath .\artifacts\TrMadenci-0.1.0-rc17-win-x64
 ```
 
 The manifest gate rejects missing, changed, and unexpected files. Authenticode remains
@@ -437,7 +495,7 @@ submits shares, and stops after the first accepted share:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Invoke-TrMadenciOpenClReleaseGate.ps1 `
-  -PackagePath .\artifacts\TrMadenci-0.1.0-rc14-win-x64 `
+  -PackagePath .\artifacts\TrMadenci-0.1.0-rc17-win-x64 `
   -ConfigurationPath .\trmadenci.etc.local.json `
   -ExpectedThumbprint YOUR_CERTIFICATE_THUMBPRINT `
   -AcknowledgeMining

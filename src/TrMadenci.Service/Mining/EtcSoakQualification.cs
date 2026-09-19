@@ -16,20 +16,25 @@ internal sealed record EtcSoakQualificationResult(
     long MaximumRecoveries = 0,
     long StatusSamples = 0);
 
-internal static class EtcSoakQualification
+internal static class GpuSoakQualification
 {
     public static readonly TimeSpan MinimumDuration = TimeSpan.FromHours(24);
     private const double MinimumActiveRatio = 0.95;
     private const double MaximumRejectedRatio = 0.05;
     private const uint CriticalTemperatureC = 85;
 
-    public static EtcSoakQualificationResult Evaluate(string summaryPath)
+    public static EtcSoakQualificationResult Evaluate(
+        string summaryPath,
+        string expectedCoin,
+        string expectedAlgorithm)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedCoin);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedAlgorithm);
         var failures = new List<string>();
         if (string.IsNullOrWhiteSpace(summaryPath))
-            return Failed("The ETC soak summary path is empty.");
+            return Failed($"The {expectedCoin} soak summary path is empty.");
         if (!File.Exists(summaryPath))
-            return Failed($"The ETC soak summary was not found: {Path.GetFullPath(summaryPath)}");
+            return Failed($"The {expectedCoin} soak summary was not found: {Path.GetFullPath(summaryPath)}");
 
         try
         {
@@ -39,8 +44,8 @@ internal static class EtcSoakQualification
             if (schemaVersion is not 1)
                 failures.Add("Only soak summary schema version 1 is supported.");
             RequireString(root, "outcome", "completed", failures);
-            RequireString(root, "coin", "ETC", failures);
-            RequireString(root, "algorithm", "ETCHASH", failures);
+            RequireString(root, "coin", expectedCoin, failures);
+            RequireString(root, "algorithm", expectedAlgorithm, failures);
 
             var requested = ReadTimeSpan(root, "requestedDuration", failures);
             var wallClock = ReadTimeSpan(root, "wallClockDuration", failures);
@@ -50,7 +55,8 @@ internal static class EtcSoakQualification
             var maximumRecoveries = ReadInt64(root, "maximumTotalRecoveries", failures);
 
             if (requested is { } requestedDuration && requestedDuration < MinimumDuration)
-                failures.Add($"Requested duration {requestedDuration:c} is below the 24-hour ETC gate.");
+                failures.Add(
+                    $"Requested duration {requestedDuration:c} is below the 24-hour {expectedCoin} gate.");
             if (requested is { } expectedWall && wallClock is { } observedWall && observedWall < expectedWall)
                 failures.Add("Wall-clock duration is shorter than the requested soak duration.");
             if (requested is { } samplingDuration && statusSamples is { } samples)
@@ -96,9 +102,10 @@ internal static class EtcSoakQualification
                     failures.Add(
                         $"Active mining time {active:c} is below {MinimumActiveRatio:P0} of the requested duration.");
                 if (accepted < 1)
-                    failures.Add("No pool-accepted ETC share was recorded.");
+                    failures.Add($"No pool-accepted {expectedCoin} share was recorded.");
                 if (acceptedUser < 1)
-                    failures.Add("No user-beneficiary ETC share was accepted during the soak.");
+                    failures.Add(
+                        $"No user-beneficiary {expectedCoin} share was accepted during the soak.");
                 if (acceptedUser > accepted)
                     failures.Add("User-beneficiary accepted shares exceed the total accepted-share count.");
                 if (invalid != 0)
@@ -127,7 +134,7 @@ internal static class EtcSoakQualification
         catch (Exception exception) when (
             exception is JsonException or IOException or UnauthorizedAccessException)
         {
-            return Failed($"The ETC soak summary could not be read: {exception.Message}");
+            return Failed($"The {expectedCoin} soak summary could not be read: {exception.Message}");
         }
     }
 
@@ -222,4 +229,16 @@ internal static class EtcSoakQualification
 
     private static EtcSoakQualificationResult Failed(string failure) =>
         new(false, [failure]);
+}
+
+internal static class EtcSoakQualification
+{
+    public static EtcSoakQualificationResult Evaluate(string summaryPath) =>
+        GpuSoakQualification.Evaluate(summaryPath, "ETC", "ETCHASH");
+}
+
+internal static class CfxSoakQualification
+{
+    public static EtcSoakQualificationResult Evaluate(string summaryPath) =>
+        GpuSoakQualification.Evaluate(summaryPath, "CFX", "OCTOPUS");
 }

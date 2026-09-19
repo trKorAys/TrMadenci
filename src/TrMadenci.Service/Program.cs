@@ -1,32 +1,40 @@
+using System.Text;
 using System.Text.Json;
 using TrMadenci.Core.Configuration;
 using TrMadenci.Protocols.Stratum;
 using TrMadenci.NativeBridge;
 using TrMadenci.Service.Mining;
 
-var etcSoakVerificationArguments = args.Where(argument =>
-    argument.StartsWith("--verify-etc-soak=", StringComparison.OrdinalIgnoreCase)).ToArray();
-if (etcSoakVerificationArguments.Length > 0)
+var soakVerificationArguments = args.Where(argument =>
+    argument.StartsWith("--verify-etc-soak=", StringComparison.OrdinalIgnoreCase) ||
+    argument.StartsWith("--verify-cfx-soak=", StringComparison.OrdinalIgnoreCase)).ToArray();
+if (soakVerificationArguments.Length > 0)
 {
-    if (etcSoakVerificationArguments.Length != 1 || args.Length != 1)
+    if (soakVerificationArguments.Length != 1 || args.Length != 1)
     {
         Console.Error.WriteLine(
-            "Use --verify-etc-soak=<summary.json> as a standalone command.");
+            "Use exactly one --verify-etc-soak=<summary.json> or " +
+            "--verify-cfx-soak=<summary.json> standalone command.");
         return ServiceExitCodes.InvalidInvocation;
     }
 
-    var verificationArgument = etcSoakVerificationArguments[0];
+    var verificationArgument = soakVerificationArguments[0];
     var summaryPath = verificationArgument[(verificationArgument.IndexOf('=') + 1)..];
     if (string.IsNullOrWhiteSpace(summaryPath))
     {
-        Console.Error.WriteLine("--verify-etc-soak requires a summary JSON path.");
+        Console.Error.WriteLine("The soak verification command requires a summary JSON path.");
         return ServiceExitCodes.InvalidInvocation;
     }
 
-    var result = EtcSoakQualification.Evaluate(summaryPath);
+    var verifyCfx = verificationArgument.StartsWith(
+        "--verify-cfx-soak=", StringComparison.OrdinalIgnoreCase);
+    var result = verifyCfx
+        ? CfxSoakQualification.Evaluate(summaryPath)
+        : EtcSoakQualification.Evaluate(summaryPath);
+    var qualificationCoin = verifyCfx ? "CFX" : "ETC";
     Console.WriteLine(result.Passed
-        ? "ETC PRODUCTION SOAK: PASS"
-        : "ETC PRODUCTION SOAK: FAIL");
+        ? $"{qualificationCoin} PRODUCTION SOAK: PASS"
+        : $"{qualificationCoin} PRODUCTION SOAK: FAIL");
     Console.WriteLine(
         $"Requested={result.RequestedDuration:c}, wall={result.WallClockDuration:c}, " +
         $"active={result.ActiveMiningTime:c}, samples={result.StatusSamples}");
@@ -37,6 +45,40 @@ if (etcSoakVerificationArguments.Length > 0)
     foreach (var failure in result.Failures)
         Console.Error.WriteLine($"- {failure}");
     return result.Passed ? ServiceExitCodes.Success : ServiceExitCodes.Failure;
+}
+
+var gpuSelectionRequested = args.Contains("--select-gpus", StringComparer.OrdinalIgnoreCase);
+if (gpuSelectionRequested)
+{
+    var unsupportedArguments = args.Where(argument =>
+        argument.StartsWith("--", StringComparison.Ordinal) &&
+        !string.Equals(argument, "--select-gpus", StringComparison.OrdinalIgnoreCase)).ToArray();
+    var configurationArguments = args.Where(argument =>
+        !argument.StartsWith("--", StringComparison.Ordinal)).ToArray();
+    if (unsupportedArguments.Length > 0 || configurationArguments.Length > 1)
+    {
+        Console.Error.WriteLine(
+            "Use --select-gpus as a standalone command with an optional configuration path.");
+        return ServiceExitCodes.InvalidInvocation;
+    }
+
+    var selectionConfigurationPath = configurationArguments.SingleOrDefault() ?? "trmadenci.json";
+    try
+    {
+        await GpuSelectionWizard.RunAsync(
+            selectionConfigurationPath,
+            Console.In,
+            Console.Out,
+            new CudaComputeBackend(),
+            new OpenClComputeBackend());
+        return ServiceExitCodes.Success;
+    }
+    catch (Exception exception) when (
+        exception is IOException or JsonException or ArgumentException or InvalidOperationException)
+    {
+        Console.Error.WriteLine($"GPU selection failed: {exception.Message}");
+        return ServiceExitCodes.Failure;
+    }
 }
 
 var controlCommands = new List<MiningControlCommand>();
@@ -162,6 +204,7 @@ var octopusCudaSelfTest = args.Contains("--octopus-cuda-self-test", StringCompar
 var octopusBuildDag = args.Contains("--octopus-build-dag", StringComparer.OrdinalIgnoreCase);
 var octopusNonceSelfTest = args.Contains("--octopus-nonce-self-test", StringComparer.OrdinalIgnoreCase);
 var octopusQualification = args.Contains("--octopus-qualification", StringComparer.OrdinalIgnoreCase);
+var randomXSelfTest = args.Contains("--randomx-self-test", StringComparer.OrdinalIgnoreCase);
 var mine = args.Contains("--mine", StringComparer.OrdinalIgnoreCase);
 var etcHashQualification = args.Contains("--etchash-qualification", StringComparer.OrdinalIgnoreCase);
 var etcHashOpenClQualification = args.Contains(
@@ -188,6 +231,12 @@ try
 
     options.Validate();
     var coin = CoinProfileCatalog.GetRequired(options.Coin);
+    if (randomXSelfTest &&
+        !string.Equals(coin.Algorithm, "randomx", StringComparison.OrdinalIgnoreCase))
+        throw new ArgumentException("--randomx-self-test requires a RandomX coin profile.");
+    if (probe && string.Equals(coin.Algorithm, "randomx", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException(
+            "RandomX live pool probing remains gated until CPU session integration and qualification are complete.");
     OpenClQualificationGate.ValidateRequest(
         etcHashOpenClQualification,
         mine,
@@ -214,6 +263,20 @@ try
         Console.WriteLine($"Developer destination: {developerPool!.Host}:{developerPool.Port} / {developerPool.Username}");
     else
         Console.WriteLine($"Developer destination: not configured for {coin.Ticker}; mining is disabled.");
+
+    if (randomXSelfTest)
+    {
+        var flags = NativeDiagnostics.GetRandomXRecommendedFlags();
+        var hash = NativeDiagnostics.ComputeRandomXLightHash(
+            Encoding.UTF8.GetBytes("test key 000"),
+            Encoding.UTF8.GetBytes("This is a test"));
+        const string expected = "639183AAE1BF4C9A35884CB46B09CAD9175F04EFD7684E7262A0AC1C2F0B4E3F";
+        if (!string.Equals(Convert.ToHexString(hash), expected, StringComparison.Ordinal))
+            throw new InvalidOperationException("RandomX official light-mode vector failed.");
+        Console.WriteLine(
+            $"RandomX v1 light-mode self-test passed: hash={Convert.ToHexString(hash).ToLowerInvariant()}, " +
+            $"recommended CPU flags={flags}. No pool connection or mining was started.");
+    }
 
     if (nativeProbe)
     {
@@ -505,7 +568,7 @@ try
         var qualificationAllowed =
             ((etcHashQualification || etcHashOpenClQualification || soakRequest is not null) &&
                 string.Equals(coin.Algorithm, "etchash", StringComparison.OrdinalIgnoreCase)) ||
-            (octopusQualification &&
+            ((octopusQualification || soakRequest is not null) &&
                 string.Equals(coin.Algorithm, "octopus", StringComparison.OrdinalIgnoreCase));
         if (!coin.MiningEnabled && !qualificationAllowed)
             throw new InvalidOperationException(
@@ -613,13 +676,14 @@ try
                 await session.RunAsync(shutdown.Token);
             }
             else if (string.Equals(coin.Algorithm, "octopus", StringComparison.OrdinalIgnoreCase) &&
-                octopusQualification)
+                (octopusQualification || soakRequest is not null))
             {
                 var session = new OctopusMiningSession(
                     options,
                     miningLog,
                     statusUpdate,
-                    stopAfterAcceptedShares: 1,
+                    stopAfterAcceptedShares: octopusQualification ? 1 : null,
+                    stopAfterDuration: soakRequest?.Duration,
                     pauseController: pauseController);
                 await session.RunAsync(shutdown.Token);
             }

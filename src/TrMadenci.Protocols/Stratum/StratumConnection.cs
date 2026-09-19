@@ -32,13 +32,19 @@ public sealed class StratumConnection : IAsyncDisposable
     }
 
     public async Task SendAsync(StratumRequest request, CancellationToken cancellationToken)
+        => await SendLineAsync(request.ToJsonLine(), cancellationToken);
+
+    public async Task SendAsync(RandomXStratumRequest request, CancellationToken cancellationToken)
+        => await SendLineAsync(request.ToJsonLine(), cancellationToken);
+
+    private async Task SendLineAsync(string jsonLine, CancellationToken cancellationToken)
     {
         var writer = _writer ?? throw new InvalidOperationException("The Stratum connection is not open.");
 
         await _writeLock.WaitAsync(cancellationToken);
         try
         {
-            await writer.WriteLineAsync(request.ToJsonLine().TrimEnd('\n').AsMemory(), cancellationToken);
+            await writer.WriteLineAsync(jsonLine.TrimEnd('\n').AsMemory(), cancellationToken);
         }
         finally
         {

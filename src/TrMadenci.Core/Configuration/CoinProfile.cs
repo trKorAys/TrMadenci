@@ -21,7 +21,11 @@ public static class CoinProfileCatalog
                 "ETCHash correctness, performance and live-share qualification passed; soak qualification remains."),
             ["cfx"] = new(
                 "cfx", "Conflux", "CFX", "Conflux Core Space Mainnet", "octopus", false,
-                "Octopus GPU vector, performance and accepted live-share qualification remain incomplete.")
+                "Octopus GPU vector, performance and accepted live-share qualification remain incomplete."),
+            ["xmr"] = new(
+                "xmr", "Monero", "XMR", "Monero Mainnet", "randomx", false,
+                "RandomX vector, full-memory context and pool protocol are implemented; " +
+                "CPU worker/session, developer XMR wallet and live qualification remain incomplete.")
         };
 
     public static IReadOnlyCollection<CoinProfile> All => Profiles.Values.ToArray();

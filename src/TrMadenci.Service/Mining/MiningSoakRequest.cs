@@ -38,8 +38,10 @@ internal sealed record MiningSoakRequest(TimeSpan Duration, bool UsesLegacyEtcOp
             !string.Equals(algorithm, "etchash", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("--etchash-soak-hours requires an ETCHash coin profile.");
         if (!string.Equals(algorithm, "kawpow", StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(algorithm, "etchash", StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("--soak-hours currently supports KAWPOW and ETCHASH profiles.");
+            !string.Equals(algorithm, "etchash", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(algorithm, "octopus", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException(
+                "--soak-hours currently supports KAWPOW, ETCHASH and OCTOPUS profiles.");
         if (qualificationRequested)
             throw new ArgumentException("Use either a qualification mode or a soak duration, not both.");
     }

@@ -10,6 +10,7 @@ internal sealed class OctopusMiningSession(
     Action<string> log,
     Action<MiningStatusSnapshot>? updateStatus = null,
     int? stopAfterAcceptedShares = null,
+    TimeSpan? stopAfterDuration = null,
     MiningPauseController? pauseController = null)
 {
     private readonly CoinProfile _coin = CoinProfileCatalog.GetRequired(options.Coin);
@@ -69,6 +70,7 @@ internal sealed class OctopusMiningSession(
             developerPool.ConnectAsync(sessionToken));
 
         var clock = Stopwatch.StartNew();
+        var soakPausedBaseline = pauseController?.TotalPausedDuration ?? TimeSpan.Zero;
         var lastTick = clock.Elapsed;
         var lastStatus = TimeSpan.Zero;
         var lastPersist = TimeSpan.Zero;
@@ -185,6 +187,13 @@ internal sealed class OctopusMiningSession(
                     await DeveloperFeeStateStore.SaveAsync(_scheduler.Snapshot(), sessionToken);
                     lastPersist = now;
                 }
+
+                if (stopAfterDuration is { } duration &&
+                    GetSoakElapsed(now, soakPausedBaseline) >= duration)
+                {
+                    log($"Octopus soak duration completed: {stopAfterDuration} active test time.");
+                    break;
+                }
             }
         }
         catch (OperationCanceledException) when (
@@ -219,6 +228,10 @@ internal sealed class OctopusMiningSession(
         if (!hasCurrentWork)
             log($"No current {_scheduler.Beneficiary} Octopus job is available; hashing pauses until one arrives.");
     }
+
+    private TimeSpan GetSoakElapsed(TimeSpan wallClockElapsed, TimeSpan pausedDurationBaseline) =>
+        pauseController?.GetUnpausedElapsed(wallClockElapsed, pausedDurationBaseline) ??
+        wallClockElapsed;
 
     private void OnWorkReceived(OctopusPoolWork work)
     {

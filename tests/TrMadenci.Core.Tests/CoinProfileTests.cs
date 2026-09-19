@@ -30,6 +30,65 @@ public sealed class CoinProfileTests
     }
 
     [Fact]
+    public void Monero_profile_is_cpu_only_and_gated_without_a_developer_wallet()
+    {
+        var profile = CoinProfileCatalog.GetRequired("xmr");
+        var options = new MinerOptions
+        {
+            Coin = "xmr",
+            Algorithm = "randomx",
+            ComputeBackend = ComputeBackendMode.Cpu,
+            CpuThreads = 0,
+            Pool = new PoolOptions { Host = "pool", Port = 1, Username = "wallet.worker" }
+        };
+
+        options.Validate();
+
+        Assert.False(profile.MiningEnabled);
+        Assert.Equal("randomx", profile.Algorithm);
+        Assert.Empty(options.GetCudaDeviceIndexes());
+        Assert.False(ProductPolicy.TryCreateDeveloperPool(profile, out _));
+    }
+
+    [Theory]
+    [InlineData("xmr", "randomx", ComputeBackendMode.Auto)]
+    [InlineData("xmr", "randomx", ComputeBackendMode.Cuda)]
+    [InlineData("rvn", "kawpow", ComputeBackendMode.Cpu)]
+    public void Coin_profiles_reject_the_wrong_processor_class(
+        string coin,
+        string algorithm,
+        ComputeBackendMode backend)
+    {
+        var options = new MinerOptions
+        {
+            Coin = coin,
+            Algorithm = algorithm,
+            ComputeBackend = backend,
+            Pool = new PoolOptions { Host = "pool", Port = 1, Username = "worker" }
+        };
+
+        Assert.Throws<ArgumentException>(options.Validate);
+    }
+
+    [Fact]
+    public void Cpu_backend_rejects_gpu_selections_and_invalid_thread_limits()
+    {
+        var options = new MinerOptions
+        {
+            Coin = "xmr",
+            Algorithm = "randomx",
+            ComputeBackend = ComputeBackendMode.Cpu,
+            CpuThreads = 2,
+            ComputeDevices = ["cuda:0"],
+            Pool = new PoolOptions { Host = "pool", Port = 1, Username = "wallet.worker" }
+        };
+
+        Assert.Throws<ArgumentException>(options.Validate);
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            (options with { ComputeDevices = [], CpuThreads = 1025 }).Validate());
+    }
+
+    [Fact]
     public void Configuration_algorithm_must_match_the_coin_profile()
     {
         var options = new MinerOptions

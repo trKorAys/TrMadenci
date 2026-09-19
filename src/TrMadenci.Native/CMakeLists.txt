@@ -4,6 +4,9 @@ project(TrMadenciNative VERSION 0.1.0 LANGUAGES C CXX CUDA)
 find_package(CUDAToolkit REQUIRED)
 
 set(KAWPOW_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/cpp-kawpow)
+set(RANDOMX_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/RandomX)
+
+add_subdirectory(${RANDOMX_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/randomx EXCLUDE_FROM_ALL)
 
 add_library(kawpow-keccak STATIC
     ${KAWPOW_ROOT}/lib/keccak/keccak.c
@@ -40,13 +43,23 @@ add_library(TrMadenci.Native SHARED
     src/octopus_reference.cpp
     src/opencl_probe.cpp
     src/reference_bridge.cpp
+    src/randomx_bridge.cpp
 )
 
 target_compile_definitions(TrMadenci.Native PRIVATE TRMADENCI_NATIVE_EXPORTS)
 target_include_directories(TrMadenci.Native PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_include_directories(TrMadenci.Native PRIVATE ${KAWPOW_ROOT}/lib/ethash)
+target_include_directories(TrMadenci.Native PRIVATE
+    ${KAWPOW_ROOT}/lib/ethash
+    ${RANDOMX_ROOT}/src
+)
 target_compile_features(TrMadenci.Native PRIVATE cxx_std_20)
-target_link_libraries(TrMadenci.Native PRIVATE kawpow-reference CUDA::cuda_driver CUDA::nvrtc CUDA::nvml)
+target_link_libraries(TrMadenci.Native PRIVATE
+    kawpow-reference
+    randomx
+    CUDA::cuda_driver
+    CUDA::nvrtc
+    CUDA::nvml
+)
 
 set_target_properties(TrMadenci.Native PROPERTIES
     CUDA_ARCHITECTURES "75;86;89;120"
@@ -57,6 +70,13 @@ set_target_properties(TrMadenci.Native PROPERTIES
 )
 
 if(MSVC)
+    set_target_properties(randomx PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
+    target_compile_options(randomx PRIVATE
+        $<$<COMPILE_LANGUAGE:C>:/wd4067>
+        $<$<COMPILE_LANGUAGE:C>:/wd4804>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4067>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4804>
+    )
     target_compile_options(TrMadenci.Native PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /WX>)
     target_compile_options(TrMadenci.Native PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4211>)
 endif()

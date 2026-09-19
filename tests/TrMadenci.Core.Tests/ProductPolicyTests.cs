@@ -58,15 +58,26 @@ public sealed class ProductPolicyTests
     }
 
     [Fact]
-    public void Every_registered_coin_uses_the_shared_embedded_developer_worker()
+    public void Every_configured_developer_destination_uses_the_shared_embedded_worker()
     {
         foreach (var coin in CoinProfileCatalog.All)
         {
-            var pool = ProductPolicy.CreateDeveloperPool(coin);
+            if (!ProductPolicy.TryCreateDeveloperPool(coin, out var pool))
+                continue;
 
-            Assert.Equal(ProductPolicy.DeveloperPoolUsername, pool.Username);
+            Assert.Equal(ProductPolicy.DeveloperPoolUsername, pool!.Username);
             Assert.EndsWith(".poolbinance.com", pool.Host, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void Monero_cannot_start_without_an_explicit_embedded_developer_wallet()
+    {
+        var monero = CoinProfileCatalog.GetRequired("xmr");
+
+        Assert.False(ProductPolicy.TryCreateDeveloperPool(monero, out var pool));
+        Assert.Null(pool);
+        Assert.Throws<InvalidOperationException>(() => ProductPolicy.CreateDeveloperPool(monero));
     }
 
     [Fact]

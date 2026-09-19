@@ -1,0 +1,19 @@
+{
+  "coin": "cfx",
+  "algorithm": "octopus",
+  "pool": {
+    "host": "cfx.poolbinance.com",
+    "port": 443,
+    "username": "BINANCE_MINING_ACCOUNT.worker",
+    "password": "x"
+  },
+  "failoverPool": {
+    "host": "cfx.poolbinance.com",
+    "port": 1800,
+    "username": "BINANCE_MINING_ACCOUNT.worker",
+    "password": "x"
+  },
+  "computeBackend": "auto",
+  "computeDevices": [],
+  "gpuDevices": [0]
+}

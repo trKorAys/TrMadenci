@@ -1,15 +1,17 @@
 # Coin and algorithm roadmap
 
-Research snapshot: 2026-09-12
+Research snapshot: 2026-09-19
 
 ## Product boundary
 
-TrMadenci must distinguish three capabilities:
+TrMadenci must distinguish two capabilities:
 
 1. A native GPU hashing engine for consumer graphics cards.
 2. A native CPU hashing engine for CPU-oriented algorithms.
-3. An ASIC controller/proxy that configures and monitors dedicated miners without
-   pretending that a desktop GPU can compete with them.
+
+ASIC configuration, monitoring and proxy functions are explicitly outside the product
+scope. Dedicated ASICs retain their own firmware and management software; TrMadenci does
+not imitate ASIC algorithms on consumer GPUs.
 
 Adding a coin name is not enough. A production-ready profile needs a consensus-correct
 algorithm, the pool's Stratum dialect, job serialization, target conversion, share
@@ -21,12 +23,12 @@ submission, wallet validation, failover behavior, test vectors, and hardware tun
 | --- | --- | --- | --- | --- |
 | P0 | KAWPOW | Ravencoin | NVIDIA GPU | End-to-end single-GPU qualification accepted by the product owner; retain second-pool, multi-GPU and signed-package coverage as broader public-release gates. |
 | P1 | ETCHash | Ethereum Classic | GPU / specialized hardware | In progress: full CUDA DAG, official CPU/GPU vector, Binance job/epoch handling, session/reconnect, accepted live share and current-epoch split-kernel performance complete; next complete soak qualification. |
-| P2 | Octopus | Conflux | High-VRAM NVIDIA GPU | Epoch/cache/DAG sizing, Binance client, full CPU oracle, CUDA DAG/worker and a CPU-verified qualification session implemented. Keep gated pending GPU vector execution, optimization and accepted live-share qualification. |
+| P2 | Octopus | Conflux | High-VRAM NVIDIA GPU | Epoch/cache/DAG sizing, Binance client, full CPU oracle, CUDA DAG/worker, CPU-verified qualification session, pause-aware soak recorder and fixed production verifier implemented. Keep gated pending GPU vector execution, optimization, accepted live-share qualification and 24-hour soak. |
 | P2 | Cross-vendor GPU backend | Existing algorithms | AMD and Intel GPU | OpenCL ICD discovery, stable device IDs, strict configuration and tested CUDA-first/OpenCL-fallback resolution are complete, together with light-cache upload and a CPU-verified full ETCHash epoch/DAG lifecycle. The split nonce-search kernel, backend-neutral ETC worker and same-process vector-to-pool qualification gate are implemented but remain disabled until executed on a signed native build; CUDA stays the optimized NVIDIA backend. |
-| P3 | RandomX | Monero | CPU | Separate CPU engine. RandomX is explicitly optimized for general-purpose CPUs, not GPUs. |
+| P3 | RandomX v1 | Monero | CPU | In progress: gated Monero profile, CPU-only configuration, vendored BSD-3-Clause v1.2.3 reference, official light-mode vector pass, persistent full-memory dataset/per-worker VM lifecycle, JSON-RPC job/login/submit codecs and a loopback-tested fail-closed pool client. Next implement the nonce worker/session, seed rollover, CPU telemetry, XMR developer wallet, accepted share and soak. GPU execution is technically possible but intentionally not offered because RandomX is CPU-optimized and GPUs are disadvantaged. |
 | Deferred | Equihash | Zcash | ASIC-dominated | Binance Pool and Spot are available, but a consumer-GPU implementation is not a competitive priority. |
 | Deferred | ETHash | EthereumPoW | GPU / specialized hardware | Binance Pool support alone is insufficient while there is no active Binance Spot market. |
-| Device support | SHA-256, Scrypt, kHeavyHash, Blake3 ASICs | BTC/BCH, LTC/DOGE, Kaspa, Alephium | ASIC | Add monitoring, configuration, proxy and Stratum support; do not spend time on noncompetitive GPU kernels. |
+| Out of scope | SHA-256, Scrypt, X11, Eaglesong, kHeavyHash and other ASIC workloads | BTC/BCH, LTC/DOGE, DASH, CKB, Kaspa and similar networks | ASIC | Use the ASIC vendor's firmware and management software; do not add noncompetitive GPU kernels or an ASIC controller to TrMadenci. |
 
 As of the 2026-09-12 review, no remaining Binance Pool coin satisfies all three of the
 initial expansion constraints: active Binance Spot/deposit support, economically useful
@@ -58,12 +60,15 @@ labeling one coin as permanently "best".
   2026-09-11 reported height 156,498,021 (Octopus epoch 298), whose DAG is approximately
   8.656 GiB and fits a 12 GiB RTX 3060 with the current safety reserve.
 - Monero's RandomX reference is BSD-3-Clause, exposes a C API, and is optimized for
-  ordinary CPUs. It belongs in a separate CPU worker with explicit thread and huge-page
-  controls.
+  ordinary CPUs. Fast mining mode shares an approximately 2,080 MiB dataset, while
+  light verification mode uses about 256 MiB and is substantially slower. It belongs in
+  a separate CPU worker with explicit thread, huge-page and secure-JIT controls. GPU
+  implementations exist, but the upstream project explicitly documents their
+  disadvantage; adding one would increase maintenance without being the preferred path.
 - Kaspa's own mining documentation says mainnet mining is now ASIC-only in practical
   terms. Alephium likewise documents that it is ASIC-friendly and that dedicated Blake3
-  miners exist. Supporting those users means managing their devices, not offering a
-  misleading GPU mode.
+  miners exist. Those workloads remain outside TrMadenci rather than being presented as
+  misleading GPU modes.
 - AMD HIP on Windows supports only a bounded current device list. OpenCL is therefore
   the better first compatibility backend for older AMD mining rigs; HIP can later be an
   optimized backend for officially supported cards.
@@ -90,12 +95,13 @@ user's selected algorithm or mine an unrelated coin.
 An algorithm is not listed as supported until all of these pass:
 
 1. Published vectors pass in the CPU/reference path.
-2. GPU results match the reference across epochs, boundary nonces and targets.
+2. Optimized backend results match the reference across epochs/keys, boundary nonces
+   and targets; CPU-only algorithms are not required to add a GPU implementation.
 3. Accepted shares are observed on at least two independent pools or one pool plus a
    local reference node; submitted shares are CPU-verified first during qualification.
 4. Reconnect, failover, difficulty changes, clean jobs, stale shares and cancellation
    are covered by automated tests.
-5. A 24-hour multi-GPU soak test has no invalid shares, leaks or unrecovered device
+5. A 24-hour multi-device soak test has no invalid shares, leaks or unrecovered worker
    errors.
 6. VRAM/RAM requirements, supported devices, power behavior and measured performance
    are displayed rather than guessed.

@@ -1,6 +1,6 @@
 # KAWPOW release readiness
 
-Snapshot: 2026-09-12
+Snapshot: 2026-09-19
 
 ## Completed
 
@@ -51,7 +51,7 @@ Snapshot: 2026-09-12
   overwrite, and records included/skipped files. A replacement bundle from the live RVN
   soak passed a zero-known-identifier scan. No automatic startup mechanism is installed
   or shipped.
-- The former ETC-only soak runner is now shared by KAWPOW and ETCHASH through
+- The former ETC-only soak runner is now shared by KAWPOW, ETCHASH and Octopus through
   `--soak-hours`. It retains the ETC command alias, rejects qualification conflicts and
   unsupported algorithms before pool access, stops cleanly at the requested duration,
   and records peak temperature, aggregate power and recovery totals in its final summary.
@@ -62,6 +62,11 @@ Snapshot: 2026-09-12
   `--pause`, `--resume`, or `--mining-status` without a configuration file. Pools stay
   connected and cache fresh work while workers are paused. Fee, active-mining and soak
   duration counters do not advance; pause count/duration are retained in soak summaries.
+- A standalone multi-GPU selection wizard enumerates CUDA/OpenCL devices without pool
+  access or mining, displays stable identifiers and VRAM, and atomically stores one, some,
+  or all detected GPUs. Cancellation does not alter the configuration. Automated tests
+  cover CUDA-first discovery, subset/all selection, OpenCL fallback, field preservation,
+  and cancellation; Supervisor remains non-interactive and consumes the saved selection.
 - A six-minute RC9 RVN/KAWPOW Supervisor soak completed normally on the RTX 3060 and
   exercised the published duration path. The DAG built in 35.96 seconds, active mining
   averaged 12.74 MH/s, eight user shares were accepted with zero rejected or locally
@@ -71,16 +76,22 @@ Snapshot: 2026-09-12
   this as the successful single-GPU RVN qualification on 2026-09-12. The recorded duration
   remains six minutes and is not misrepresented as 24-hour/multi-GPU evidence; those and
   second-pool coverage remain broader public-release gates.
-- The unsigned `0.1.0-rc14` package is assembled from the current Release native build,
+- CFX/Octopus production preparation now includes a public example configuration with
+  Binance's primary and failover endpoints, a pause-aware duration soak, and a standalone
+  fixed-threshold CFX evidence verifier. Ordinary CFX mining remains gated until its GPU
+  vector, performance and accepted live-share qualifications pass; only then may its
+  24-hour soak begin.
+- The unsigned `0.1.0-rc17` package is assembled from the current Release native build,
   contains all required runtime and example files, excludes local worker configuration,
   and is ready for publisher signing. Its packaged native DLL matches the Release build
-  at SHA-256 `51EA656070ACCDCED52ACFB5FF0D950BB95CB3642C295EB1E5B563C27D1DEFD4`;
+  at SHA-256 `7AAE54694AD5FBD2E2CD4A7F0A86E4C4D1C6FF7EE71CC9CDFC1F485DF293C05B`;
   the unsigned service apphost is
-  `AA839AB4512EA5236FF85220679A38169BB4C469BE254A85D473870C2E8D2989`.
-- The Release solution build is warning-free and all 141 hardware-independent tests pass,
+  `DCB5EB61070C7E38969777146083D20612E6C2CC508059C59B4D869F28E68C2C`.
+- The Release solution build is warning-free and all 164 hardware-independent tests pass,
   including pause timing/idempotence, same-user named-pipe control, and paused Octopus
   fresh-job routing. Supervisor status-transport integration and the `P`/`S`/`D`/`R`
-  keyboard map are also covered. No mining was started while validating RC14.
+  keyboard map and GPU selection workflow are also covered. A pre-existing user-started
+  mining process remained active and untouched; validation used an isolated output path.
 
 ## Release gates still requiring operational time or credentials
 
@@ -104,6 +115,26 @@ Snapshot: 2026-09-12
 
 Until those external qualification gates pass, describe this build as a production
 candidate rather than a final production release.
+
+## RandomX expansion status
+
+- Monero is registered as a disabled `randomx` profile and requires the explicit CPU
+  backend. Configuration rejects GPU selections, invalid thread limits and CPU use by
+  GPU algorithms.
+- Upstream RandomX v1.2.3 revision
+  `12f2c2ffe2108d6cf54c391fee33c8bc3646cdab` is vendored under BSD-3-Clause and linked
+  statically into the native bridge.
+- The official `test key 000` / `This is a test` light-mode vector passes with hash
+  `639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f`. The diagnostic
+  uses about 256 MiB and opens no pool connection.
+- The native bridge now owns a persistent approximately 2,080 MiB full dataset,
+  per-worker VMs, parallel initialization, secure JIT and large-page fallback. The API is
+  compiled but its large allocation was not executed while the user's RVN miner was active.
+- Monero JSON-RPC login/job/submit codecs and a reconnecting, fail-closed pool client pass
+  loopback initial-job, job-notification, accepted-share and rejected-login tests.
+- XMR mining remains disabled. CPU nonce worker/session integration, seed rollover,
+  bounded cancellation, CPU health/temperature reporting, failover/live-share tests,
+  compiled developer XMR wallet and soak evidence are still required.
 
 ## ETC expansion status
 
@@ -151,7 +182,7 @@ candidate rather than a final production release.
   about 48% above the pre-split live qualification band of 9.84-10.40 MH/s.
 - ETC remains disabled until the soak gate passes.
 
-RC14 retains the standalone, read-only `--verify-etc-soak=<summary.json>` promotion gate. It
+RC17 retains the standalone, read-only `--verify-etc-soak=<summary.json>` promotion gate. It
 requires a completed ETC/ETCHASH soak requested for at least 24 hours, at least 95% active
 mining time, adequate status density, one accepted user-beneficiary share, zero locally
 invalid shares, no more than 5% rejected shares, positive power/energy/VRAM evidence, peak
@@ -160,13 +191,17 @@ separate user and developer accepted shares, and summaries retain maximum VRAM p
 The ETC profile is not enabled merely because this code exists; it will be promoted only
 after real evidence passes the fixed verifier.
 
+The corresponding `--verify-cfx-soak=<summary.json>` command applies the same immutable
+thresholds while additionally requiring the CFX/Octopus identity. It does not unlock the
+profile or replace the preceding GPU-vector and accepted-live-share gates.
+
 The duration-controlled soak runner writes ten-second JSONL status/event evidence and a
 final JSON summary under `artifacts/soak`, including process id, wall-clock/active time,
-shares, invalid results, energy and per-GPU health. It now uses the shared KAWPOW/ETCHASH
-recorder; the previously captured ETC evidence remains valid. A 36-second live smoke-soak
-completed
-automatically with valid JSONL, 14.60 MH/s at its final sample, zero invalid shares and a
-clean summary. This validates the runner, not the required 24-hour duration.
+shares, invalid results, energy and per-GPU health. It now uses the shared
+KAWPOW/ETCHASH/Octopus recorder; the previously captured ETC evidence remains valid. A
+36-second live smoke-soak completed automatically with valid JSONL, 14.60 MH/s at its
+final sample, zero invalid shares and a clean summary. This validates the runner, not the
+required 24-hour duration.
 
 A planned 24-hour RTX 3060 run started on 2026-09-11 at 16:10:36 +03:00 but was stopped
 at the user's request shortly after startup because the machine was unattended. Its
@@ -192,5 +227,5 @@ partial stability evidence but does not satisfy the fixed 24-hour qualification 
 - Windows Smart App Control activated before that native nonce diagnostic could execute
   and rejects the newly built unsigned `TrMadenci.Native.dll`. No pool connection or
   share submission was started after the block. Qualification remains pending until the
-  `rc14` binaries receive a trusted publisher signature; Smart App Control is not disabled
+  `rc17` binaries receive a trusted publisher signature; Smart App Control is not disabled
   and a self-signed root is not installed as a workaround.

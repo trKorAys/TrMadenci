@@ -66,6 +66,51 @@ public sealed record CudaSearchResult(
 
 public sealed record KawPowHash(byte[] MixHash, byte[] FinalHash);
 
+[Flags]
+public enum RandomXCpuFlags : uint
+{
+    None = 0,
+    LargePages = 1,
+    HardwareAes = 2,
+    FullMemory = 4,
+    Jit = 8,
+    SecureJit = 16,
+    Argon2Ssse3 = 32,
+    Argon2Avx2 = 64
+}
+
+public sealed record RandomXDatasetBuildInfo(
+    uint VirtualMachineCount,
+    uint InitializationThreads,
+    RandomXCpuFlags RecommendedFlags,
+    bool HugePagesActive,
+    ulong DatasetBytes,
+    TimeSpan BuildTime);
+
+public sealed class RandomXDatasetContext : IDisposable
+{
+    private readonly NativeDiagnostics.RandomXContextHandle _handle;
+
+    internal RandomXDatasetContext(
+        NativeDiagnostics.RandomXContextHandle handle,
+        RandomXDatasetBuildInfo buildInfo)
+    {
+        _handle = handle;
+        BuildInfo = buildInfo;
+    }
+
+    public RandomXDatasetBuildInfo BuildInfo { get; }
+
+    public byte[] ComputeHash(uint workerIndex, byte[] input)
+    {
+        if (workerIndex >= BuildInfo.VirtualMachineCount)
+            throw new ArgumentOutOfRangeException(nameof(workerIndex));
+        return NativeDiagnostics.ComputeRandomXDatasetHash(_handle, workerIndex, input);
+    }
+
+    public void Dispose() => _handle.Dispose();
+}
+
 public sealed class CudaEpochContext : IDisposable
 {
     private readonly NativeDiagnostics.CudaEpochHandle _handle;
@@ -468,6 +513,93 @@ public static class NativeDiagnostics
         return finalHash;
     }
 
+    public static RandomXCpuFlags GetRandomXRecommendedFlags() =>
+        (RandomXCpuFlags)NativeMethods.RandomXRecommendedFlags();
+
+    public static byte[] ComputeRandomXLightHash(byte[] key, byte[] input)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(input);
+        if (key.Length == 0)
+            throw new ArgumentException("RandomX key must not be empty.", nameof(key));
+        if (input.Length == 0)
+            throw new ArgumentException("RandomX input must not be empty.", nameof(input));
+
+        var output = new byte[32];
+        var status = NativeMethods.RandomXHashLight(
+            key, (nuint)key.Length, input, (nuint)input.Length, output);
+        if (status != 0)
+            throw new InvalidOperationException(
+                $"RandomX light-mode hash failed ({status}). " +
+                "At least 256 MiB of available memory is required.");
+        return output;
+    }
+
+    public static RandomXDatasetContext CreateRandomXDataset(
+        byte[] key,
+        uint virtualMachineCount,
+        uint initializationThreads,
+        bool useHugePages = true,
+        bool secureJit = true)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        if (key.Length == 0)
+            throw new ArgumentException("RandomX key must not be empty.", nameof(key));
+        if (virtualMachineCount == 0)
+            throw new ArgumentOutOfRangeException(nameof(virtualMachineCount));
+        if (initializationThreads == 0)
+            throw new ArgumentOutOfRangeException(nameof(initializationThreads));
+
+        var status = NativeMethods.CreateRandomXContext(
+            key,
+            (nuint)key.Length,
+            virtualMachineCount,
+            initializationThreads,
+            useHugePages ? 1 : 0,
+            secureJit ? 1 : 0,
+            out var pointer,
+            out var nativeInfo);
+        if (status != 0)
+        {
+            if (pointer != IntPtr.Zero)
+                NativeMethods.DestroyRandomXContext(pointer);
+            throw new InvalidOperationException(
+                $"RandomX full-memory dataset creation failed ({status}). " +
+                "At least 2,080 MiB of available memory is required.");
+        }
+
+        var handle = new RandomXContextHandle(pointer);
+        var buildInfo = new RandomXDatasetBuildInfo(
+            nativeInfo.VirtualMachineCount,
+            nativeInfo.InitializationThreads,
+            (RandomXCpuFlags)nativeInfo.RecommendedFlags,
+            nativeInfo.HugePagesActive != 0,
+            nativeInfo.DatasetBytes,
+            TimeSpan.FromMilliseconds(nativeInfo.BuildMilliseconds));
+        return new RandomXDatasetContext(handle, buildInfo);
+    }
+
+    internal static byte[] ComputeRandomXDatasetHash(
+        RandomXContextHandle context,
+        uint workerIndex,
+        byte[] input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        if (input.Length == 0)
+            throw new ArgumentException("RandomX input must not be empty.", nameof(input));
+
+        var output = new byte[32];
+        var status = NativeMethods.RandomXCalculateHash(
+            context,
+            workerIndex,
+            input,
+            (nuint)input.Length,
+            output);
+        if (status != 0)
+            throw new InvalidOperationException($"RandomX full-memory hash failed ({status}).");
+        return output;
+    }
+
     internal static CudaSearchResult SearchCuda(
         CudaEpochHandle epoch,
         int blockNumber,
@@ -658,6 +790,17 @@ public static class NativeDiagnostics
         public double SearchMilliseconds;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRandomXBuildInfo
+    {
+        public uint VirtualMachineCount;
+        public uint InitializationThreads;
+        public uint RecommendedFlags;
+        public int HugePagesActive;
+        public ulong DatasetBytes;
+        public double BuildMilliseconds;
+    }
+
     private static class NativeMethods
     {
         private const string Library = "TrMadenci.Native";
@@ -753,6 +896,39 @@ public static class NativeDiagnostics
             [In, MarshalAs(UnmanagedType.LPArray, SizeConst = 32)] uint[] points,
             [Out, MarshalAs(UnmanagedType.LPArray, SizeConst = 32)] byte[] finalHash);
 
+        [DllImport(Library, EntryPoint = "trmadenci_randomx_recommended_flags", CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint RandomXRecommendedFlags();
+
+        [DllImport(Library, EntryPoint = "trmadenci_randomx_hash_light", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int RandomXHashLight(
+            [In] byte[] key,
+            nuint keySize,
+            [In] byte[] input,
+            nuint inputSize,
+            [Out, MarshalAs(UnmanagedType.LPArray, SizeConst = 32)] byte[] output);
+
+        [DllImport(Library, EntryPoint = "trmadenci_create_randomx_context", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int CreateRandomXContext(
+            [In] byte[] key,
+            nuint keySize,
+            uint virtualMachineCount,
+            uint initializationThreads,
+            int useHugePages,
+            int secureJit,
+            out IntPtr context,
+            out NativeRandomXBuildInfo buildInfo);
+
+        [DllImport(Library, EntryPoint = "trmadenci_destroy_randomx_context", CallingConvention = CallingConvention.Cdecl)]
+        public static extern void DestroyRandomXContext(IntPtr context);
+
+        [DllImport(Library, EntryPoint = "trmadenci_randomx_calculate_hash", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int RandomXCalculateHash(
+            RandomXContextHandle context,
+            uint workerIndex,
+            [In] byte[] input,
+            nuint inputSize,
+            [Out, MarshalAs(UnmanagedType.LPArray, SizeConst = 32)] byte[] output);
+
         [DllImport(Library, EntryPoint = "trmadenci_create_cuda_epoch", CallingConvention = CallingConvention.Cdecl)]
         public static extern int CreateCudaEpoch(
             int blockNumber,
@@ -833,6 +1009,19 @@ public static class NativeDiagnostics
         protected override bool ReleaseHandle()
         {
             NativeMethods.DestroyEtcHashOpenClEpoch(handle);
+            return true;
+        }
+    }
+
+    internal sealed class RandomXContextHandle : SafeHandle
+    {
+        public RandomXContextHandle(IntPtr pointer) : base(IntPtr.Zero, ownsHandle: true) => SetHandle(pointer);
+
+        public override bool IsInvalid => handle == IntPtr.Zero;
+
+        protected override bool ReleaseHandle()
+        {
+            NativeMethods.DestroyRandomXContext(handle);
             return true;
         }
     }
